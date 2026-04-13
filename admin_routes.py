@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse
 from starlette.requests import Request
 
 from config import API_PORT
-from vector_store import get_stats, get_connection
+from vector_store import get_stats
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +38,12 @@ def get_process_info() -> dict:
 
 
 def get_milvus_status() -> dict:
-    """檢查 Milvus 連線"""
+    """檢查 PostgreSQL 連線"""
     try:
-        get_connection()
+        from db import get_conn
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
         stats = get_stats()
         return {"connected": True, "stats": stats}
     except Exception as e:

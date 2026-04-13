@@ -1,5 +1,6 @@
 """
 DocVault FastAPI - 文件向量資料庫 API
+PostgreSQL + pgvector
 """
 import sys
 sys.path.append(".")
@@ -18,37 +19,35 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import nest_asyncio
 
-# 允許在已有事件迴圈的環境執行（WSL/Colab 相容）
 try:
     nest_asyncio.apply()
 except Exception:
     pass
 
 from config import API_HOST, API_PORT, IMAGE_DIR, OUTPUT_DIR
-from vector_store import ensure_collection, insert_chunks, search as milvus_search, get_chunks_by_ids, delete_by_file_id, get_stats
+from db import init_db, get_conn
+from vector_store import insert_chunks, search as pg_search, get_chunks_by_ids, get_stats
 from parsers.pdf_parser import parse_pdf
 from parsers.word_parser import parse_docx
 from parsers.ppt_parser import parse_pptx
 from parsers.excel_parser import parse_xlsx
 from ppt_generator import generate_ppt
 from embeddings import get_embedding_provider
-from admin_routes import router as admin_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# ======================== 事件生命週期 ========================
+# ======================== 生命週期 ========================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """啟動時確保 Milvus Collection 存在"""
-    logger.info("正在初始化 Milvus Collection...")
+    logger.info("初始化資料庫...")
     try:
-        ensure_collection()
-        logger.info("Milvus Collection 初始化完成")
+        init_db()
+        logger.info("資料庫初始化完成")
     except Exception as e:
-        logger.warning(f"Milvus 初始化警告：{e}")
+        logger.warning(f"資料庫初始化警告：{e}")
     yield
     logger.info("DocVault API 關閉")
 
@@ -57,8 +56,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="DocVault API",
-    description="文件向量資料庫 — 入庫、搜尋、PPT 匯出",
-    version="1.0.0",
+    description="文件向量資料庫 — 入庫、搜尋、PPT 匯出（PostgreSQL + pgvector）",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -71,6 +70,7 @@ app.add_middleware(
 )
 
 # Admin web 管理介面
+from admin_routes import router as admin_router
 app.include_router(admin_router)
 
 
@@ -80,7 +80,13 @@ class SearchRequest(BaseModel):
     query: str
     top_k: int = 10
     file_types: list[str] | None = None
-    tags: list[str] | None = None
+    confidentiality: list[str] | None = None
+    user_id: str | None = None  # JWT user_id
+
+
+class PermissionSyncRequest(BaseModel):
+    user_id: str
+    documents: list[dict]  # [{"document_id": "xxx", "access_level": "read"}]
 
 
 class ExportPptRequest(BaseModel):
@@ -91,8 +97,7 @@ class ExportPptRequest(BaseModel):
 
 # ======================== 工具函式 ========================
 
-def parse_file(file_path: str, file_id: str, file_ext: str, metadata: dict) -> tuple[list[dict], list[str]]:
-    """根據副檔名分派 Parser"""
+def parse_file(file_path: str, file_id: str, file_ext: str, metadata: dict):
     parsers = {
         ".pdf": parse_pdf,
         ".docx": parse_docx,
@@ -137,13 +142,37 @@ async def ingest(
         )
 
     # 解析 metadata
-    import json
     meta = {}
     if metadata:
         try:
             meta = json.loads(metadata)
         except Exception:
             pass
+
+    # confidentiality 寫入 documents 表
+    confidentiality = meta.get("confidentiality", "公開")
+    department = meta.get("department", "")
+
+    # 寫入 documents 表
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO documents (file_id, filename, file_type, confidentiality, department, metadata_json)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (file_id) DO UPDATE
+                    SET filename = EXCLUDED.filename,
+                        confidentiality = EXCLUDED.confidentiality,
+                        department = EXCLUDED.department,
+                        metadata_json = EXCLUDED.metadata_json
+            """, (file_id, file.filename or "unknown", file_ext.lstrip("."), confidentiality, department, json.dumps(meta)))
+
+            # 如果有指定 document_id（旧格式相容），也更新
+            doc_id = meta.get("document_id")
+            if doc_id and doc_id != file_id:
+                cur.execute("UPDATE documents SET file_id = %s WHERE file_id = %s", (doc_id, file_id))
+                file_id = doc_id
+
+            conn.commit()
 
     # 儲存暫存檔
     temp_dir = Path("/tmp/docvault")
@@ -162,12 +191,11 @@ async def ingest(
 
         # 向量化
         embed = get_embedding_provider()
-
         for chunk in chunks:
             vectors = embed.embed([chunk["text"][:8000]])
             chunk["embedding"] = vectors[0]
 
-        # 寫入 Milvus
+        # 寫入 PostgreSQL
         insert_chunks(chunks)
 
         elapsed_ms = int((time.time() - start) * 1000)
@@ -176,11 +204,11 @@ async def ingest(
             "file_id": file_id,
             "filename": file.filename,
             "file_type": file_ext.lstrip("."),
+            "confidentiality": confidentiality,
             "status": "completed",
             "chunk_count": chunk_count,
             "image_count": image_count,
             "processing_time_ms": elapsed_ms,
-            "created_at": chunks[0]["created_at"] if chunks else None,
         })
 
     except ValueError as e:
@@ -189,26 +217,24 @@ async def ingest(
         logger.exception("入庫錯誤")
         raise HTTPException(status_code=500, detail={"error": str(e)})
     finally:
-        # 刪除暫存檔
         if temp_path.exists():
             os.remove(temp_path)
 
 
 @app.post("/search")
 async def search_endpoint(req: SearchRequest):
-    """搜尋文件"""
+    """搜尋文件（可指定 user_id 做權限過濾）"""
     try:
         embed = get_embedding_provider()
-
-        # 向量化查詢語句
         vectors = embed.embed([req.query])
         query_vector = vectors[0]
 
-        # 搜尋
-        results = milvus_search(
+        results = pg_search(
             query_vector=query_vector,
             top_k=req.top_k,
+            user_id=req.user_id,
             file_types=req.file_types,
+            confidentiality=req.confidentiality,
         )
 
         return JSONResponse({
@@ -219,6 +245,79 @@ async def search_endpoint(req: SearchRequest):
 
     except Exception as e:
         logger.exception("搜尋錯誤")
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@app.post("/permissions/sync")
+async def sync_permissions(req: PermissionSyncRequest):
+    """
+    同步使用者權限
+    原系統呼叫此端點更新每位使用者的文件訪問權限
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # 刪除該 user 的舊權限
+                cur.execute(
+                    "DELETE FROM document_permissions WHERE user_id = %s",
+                    (req.user_id,)
+                )
+
+                # 寫入新權限
+                records = [
+                    (req.user_id, doc["document_id"], doc.get("access_level", "read"))
+                    for doc in req.documents
+                ]
+                if records:
+                    execute_values = __import__("psycopg2.extras", fromlist=["execute_values"]).execute_values
+                    execute_values(
+                        cur,
+                        "INSERT INTO document_permissions (user_id, document_id, access_level) VALUES %s",
+                        records,
+                        template="(%s, %s, %s)",
+                    )
+                conn.commit()
+
+        return JSONResponse({
+            "status": "ok",
+            "user_id": req.user_id,
+            "document_count": len(req.documents),
+        })
+
+    except Exception as e:
+        logger.exception("權限同步錯誤")
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@app.get("/permissions/{user_id}")
+async def get_user_permissions(user_id: str):
+    """查詢使用者的文件權限"""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT dp.document_id, dp.access_level, dp.granted_at,
+                           d.filename, d.confidentiality
+                    FROM document_permissions dp
+                    JOIN documents d ON dp.document_id = d.file_id
+                    WHERE dp.user_id = %s
+                """, (user_id,))
+                rows = cur.fetchall()
+
+        return JSONResponse({
+            "user_id": user_id,
+            "documents": [
+                {
+                    "document_id": r[0],
+                    "access_level": r[1],
+                    "granted_at": r[2],
+                    "filename": r[3],
+                    "confidentiality": r[4],
+                }
+                for r in rows
+            ],
+        })
+    except Exception as e:
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
@@ -262,9 +361,12 @@ async def collections_stats():
 
 @app.delete("/collection/{file_id}")
 async def delete_file_chunks(file_id: str):
-    """刪除指定檔案的所有 chunks"""
+    """刪除檔案（會 Cascade 刪除 chunks 和權限）"""
     try:
-        delete_by_file_id(file_id)
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM documents WHERE file_id = %s", (file_id,))
+                conn.commit()
         return JSONResponse({"status": "deleted", "file_id": file_id})
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": str(e)})

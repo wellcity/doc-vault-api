@@ -103,8 +103,8 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
 class LocalEmbeddingProvider(EmbeddingProvider):
     def __init__(self, model_name: str, dim: int):
         from sentence_transformers import SentenceTransformer
-        logger.info(f"載入本地模型：{model_name}")
-        self.model = SentenceTransformer(model_name)
+        logger.info(f"載入本地模型：{model_name}（CPU）")
+        self.model = SentenceTransformer(model_name, device="cpu")
         self._dim = dim
 
     def embed(self, texts: list[str]) -> list[list[float]]:
