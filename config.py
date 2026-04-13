@@ -1,0 +1,27 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
+MILVUS_PORT = int(os.getenv("MILVUS_PORT", "19530"))
+
+# Embedding 設定
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "openai")  # openai | ollama | local
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+
+# Ollama 設定（EMBEDDING_PROVIDER=ollama 時使用）
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
+
+# Sentence-Transformers 設定（EMBEDDING_PROVIDER=local 時使用）
+LOCAL_EMBEDDING_MODEL = os.getenv("LOCAL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+LOCAL_EMBEDDING_DIM = int(os.getenv("LOCAL_EMBEDDING_DIM", "384"))
+
+DATA_DIR = os.getenv("DATA_DIR", "./processed")
+IMAGE_DIR = os.getenv("IMAGE_DIR", "./processed/images")
+OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./output")
+API_HOST = os.getenv("API_HOST", "0.0.0.0")
+API_PORT = int(os.getenv("API_PORT", "5002"))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
