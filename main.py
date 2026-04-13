@@ -32,6 +32,7 @@ from parsers.ppt_parser import parse_pptx
 from parsers.excel_parser import parse_xlsx
 from ppt_generator import generate_ppt
 from embeddings import get_embedding_provider
+from admin_routes import router as admin_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -68,6 +69,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Admin web 管理介面
+app.include_router(admin_router)
 
 
 # ======================== 模型 ========================
