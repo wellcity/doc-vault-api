@@ -121,7 +121,7 @@ def search(
             "metadata": row[6] if len(row) > 6 else {},
             "filename": row[7],
             "confidentiality": row[8],
-            "score": 1 - float(row[9]),  # cosine_dist 越小越相似
+            "score": 1 - float(row[9]),
         })
 
     return results

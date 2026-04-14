@@ -1,11 +1,11 @@
 # DocVault API
 
-文件向量資料庫 API。將文件（PDF、Word、PowerPoint、Excel）建置至 Milvus 向量資料庫，提供搜尋與 PPT 匯出功能。
+文件向量資料庫 API。將文件（PDF、Word、PowerPoint、Excel）建置至 PostgreSQL 向量資料庫（pgvector），提供搜尋與 PPT 匯出功能，支援文件機密等級與使用者權限控制。
 
 ## 系統需求
 
 - Python 3.10+
-- Milvus（建議 v2.4+，運行於 localhost:19530）
+- PostgreSQL 16+（含 pgvector extension）
 - Ollama / OpenAI API / sentence-transformers（向量化的 embedding 模型）
 
 ## 快速開始
@@ -16,19 +16,33 @@
 pip install -r requirements.txt
 ```
 
-### 2. 設定
+### 2. 啟動 PostgreSQL
+
+```bash
+docker run -d --name docvault-postgres \
+  -p 5432:5432 \
+  -e POSTGRES_DB=docvault \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=docvault123 \
+  pgvector/pgvector:pg16
+```
+
+### 3. 設定
 
 建立 `.env` 檔案：
 
 ```bash
-# Milvus
-MILVUS_HOST=localhost
-MILVUS_PORT=19530
+# PostgreSQL
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=docvault
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=docvault123
 
 # Embedding Provider（三選一）
-EMBEDDING_PROVIDER=ollama        # 建議
+EMBEDDING_PROVIDER=local        # 建議（已內建sentence-transformers）
+# EMBEDDING_PROVIDER=ollama
 # EMBEDDING_PROVIDER=openai
-# EMBEDDING_PROVIDER=local
 
 # Ollama（EMBEDDING_PROVIDER=ollama 時使用）
 OLLAMA_BASE_URL=http://localhost:11434
@@ -47,7 +61,7 @@ API_HOST=0.0.0.0
 API_PORT=5002
 ```
 
-### 3. 啟動
+### 4. 啟動
 
 ```bash
 python main.py
@@ -55,7 +69,7 @@ python main.py
 
 服務啟動於 `http://localhost:5002`
 
-### 4. 驗證
+### 5. 驗證
 
 ```bash
 curl http://localhost:5002/health
@@ -66,18 +80,43 @@ curl http://localhost:5002/health
 ### 入庫
 
 ```bash
-# 單一檔案
+# 單一檔案（公開文件）
 curl -X POST http://localhost:5002/ingest \
-  -F "file=@文件.pdf" \
-  -F "metadata={\"source\":\"HR部門\",\"tags\":[\"法規\"]}"
+  -F "file=@文件.pdf"
+
+# 指定機密等級
+curl -X POST http://localhost:5002/ingest \
+  -F "file=@機密文件.pdf" \
+  -F "metadata={\"confidentiality\":\"機密\",\"department\":\"HR\"}"
 ```
 
 ### 搜尋
 
 ```bash
+# 所有人可見的搜尋
 curl -X POST http://localhost:5002/search \
   -H "Content-Type: application/json" \
   -d '{"query": "特休假的規定", "top_k": 10}'
+
+# 特定使用者的權限過濾搜尋
+curl -X POST http://localhost:5002/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "特休假的規定", "user_id": "user_001", "top_k": 10}'
+```
+
+### 權限同步
+
+```bash
+# 原系統同步使用者權限
+curl -X POST http://localhost:5002/permissions/sync \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user_001",
+    "documents": [
+      {"document_id": "doc_abc", "access_level": "read"},
+      {"document_id": "doc_xyz", "access_level": "read"}
+    ]
+  }'
 ```
 
 ### 匯出 PPT
@@ -93,8 +132,10 @@ curl -X POST http://localhost:5002/export/ppt \
 
 | 方法 | 路徑 | 說明 |
 |------|------|------|
-| GET | `/collections/stats` | 統計資訊 |
+| GET | `/collections/stats` | 文件/chunks/使用者統計 |
+| GET | `/permissions/{user_id}` | 查詢使用者的文件權限 |
 | DELETE | `/collection/{file_id}` | 刪除檔案所有 chunks |
+| GET | `/admin` | Web 管理介面 |
 | GET | `/health` | 健康檢查 |
 
 ## 支援格式
@@ -118,12 +159,9 @@ McpServerIIS（.NET 8）
     │  HTTP（port 5002）
     ▼
 DocVault API（本專案）
+    │
+    └── PostgreSQL（向量 + 權限 + metadata）
 ```
-
-啟動時確保 DocVault API 先啟動，McpServerIIS 啟動時會自動註冊以下 Tools：
-- `doc_ingest` — 上傳檔案入庫
-- `doc_search` — 搜尋文件
-- `doc_export_ppt` — 匯出 PPT
 
 ## 目錄結構
 
@@ -131,9 +169,11 @@ DocVault API（本專案）
 doc-vault-api/
 ├── main.py              # FastAPI 應用程式
 ├── config.py            # 設定讀取
+├── db.py                # PostgreSQL 連線與 schema
 ├── embeddings.py        # Embedding Provider（工廠模式）
-├── vector_store.py      # Milvus 操作
+├── vector_store.py      # pgvector 操作
 ├── ppt_generator.py     # PPT 生成
+├── admin_routes.py      # Web Admin 管理介面
 ├── parsers/             # 文件解析器
 │   ├── pdf_parser.py
 │   ├── word_parser.py
@@ -142,14 +182,24 @@ doc-vault-api/
 ├── processed/           # 處理過的資料
 │   └── images/          # 萃取的圖片
 ├── output/              # 輸出檔案
-└── requirements.txt
+├── requirements.txt
+└── windows-service-setup.md
 ```
 
 ## Embedding Provider
 
 支援三種模式，透過 `EMBEDDING_PROVIDER` 設定切換：
 
-### Ollama（推薦）
+### 本地模型（預設，離線可用）
+
+```bash
+# sentence-transformers 會自動下載模型
+EMBEDDING_PROVIDER=local
+LOCAL_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+LOCAL_EMBEDDING_DIM=384
+```
+
+### Ollama
 
 ```bash
 # 安裝 Ollama
@@ -165,26 +215,47 @@ ollama serve
 ### OpenAI
 
 ```bash
-# 設定 API Key
 OPENAI_API_KEY=sk-xxx
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 ```
 
-### 本地模型
+## 資料庫 Schema
 
-```bash
-pip install sentence-transformers
-# 模型會自動下載
+```sql
+-- 文件主表
+CREATE TABLE documents (
+    file_id         VARCHAR(64) PRIMARY KEY,
+    filename        VARCHAR(256),
+    file_type       VARCHAR(16),
+    confidentiality VARCHAR(32),  -- 公開 / 內部 / 機密 / 極機密
+    department      VARCHAR(64),
+    metadata_json   TEXT,
+    created_at      TIMESTAMP
+);
+
+-- Chunks 表（含向量）
+CREATE TABLE document_chunks (
+    chunk_id      VARCHAR(64) PRIMARY KEY,
+    file_id       VARCHAR(64) REFERENCES documents(file_id) ON DELETE CASCADE,
+    page          INTEGER,
+    chunk_index   INTEGER,
+    text          TEXT,
+    image_paths   TEXT[],
+    text_vector   VECTOR(384),   -- pgvector 向量
+    created_at    TIMESTAMP
+);
+
+-- 使用者權限表
+CREATE TABLE document_permissions (
+    id           SERIAL PRIMARY KEY,
+    user_id      VARCHAR(64),
+    document_id  VARCHAR(64) REFERENCES documents(file_id) ON DELETE CASCADE,
+    access_level VARCHAR(16),   -- read / write
+    granted_at   TIMESTAMP,
+    UNIQUE(user_id, document_id)
+);
 ```
 
-## Milvus 安裝
+## Windows Service 安裝
 
-```bash
-mkdir -p milvus && cd milvus
-curl -fsSL https://github.com/milvus-io/milvus/releases/download/v2.4.9/milvus-standalone-docker-compose.yml -o docker-compose.yml
-docker compose up -d
-```
-
-Milvus 啟動於 `localhost:19530`。
-
-可搭配 [Attu](https://github.com/zilliztech/attu)（Milvus GUI）管理。
+使用 NSSM 將 DocVault API 安裝為 Windows Service。詳見 `windows-service-setup.md`。

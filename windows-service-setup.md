@@ -85,7 +85,7 @@ cd C:\Tools\nssm
 
 ### Dependencies 分頁（選填）
 
-如果 Milvus 也是手動啟動的服務，可以設定為相依服務，Milvus 啟動後 DocVault 才會啟動。
+DocVault API 依賴 PostgreSQL，確保 PostgreSQL Docker container 先行啟動後再啟動 DocVault Service。
 
 ---
 
@@ -140,19 +140,6 @@ nssm.exe edit DocVaultAPI
 ```
 
 ---
-
-## 讓 Milvus 也是 Service（選項）
-
-Milvus Standalone 也可以用 NSSM 包成 Service：
-
-```powershell
-cd C:\Tools\nssm
-.\nssm.exe install Milvus
-```
-
-設定：
-- Path：`C:\docker\docker-compose.exe`（如果用 Docker Compose 方式）或
-- Path：`C:\milvus\milvus.exe`（如果直接安裝 Milvus）
 
 ---
 

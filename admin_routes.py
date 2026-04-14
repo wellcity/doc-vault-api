@@ -4,15 +4,13 @@ DocVault API - Web Admin 管理介面
 import sys
 sys.path.append(".")
 
-import subprocess
 import psutil
 import logging
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
-from starlette.requests import Request
 
 from config import API_PORT
 from vector_store import get_stats
@@ -37,7 +35,7 @@ def get_process_info() -> dict:
         return {"pid": None, "memory_mb": None, "cpu_percent": None, "create_time": None}
 
 
-def get_milvus_status() -> dict:
+def get_db_status() -> dict:
     """檢查 PostgreSQL 連線"""
     try:
         from db import get_conn
@@ -85,16 +83,12 @@ ADMIN_HTML = """
   .card-value { font-size: 1.4rem; font-weight: 600; }
   .status-ok { color: #00e676; }
   .status-error { color: #ff5252; }
-  .status-running { color: #00e676; }
-  .status-stopped { color: #ff5252; }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
 
   .btn { display: inline-block; padding: 8px 16px; border-radius: 5px; cursor: pointer; border: none; font-size: 0.9rem; transition: opacity 0.2s; }
   .btn:hover { opacity: 0.85; }
-  .btn-restart { background: #ff9800; color: #fff; }
   .btn-refresh { background: #2196f3; color: #fff; }
-  .btn-refresh:disabled { opacity: 0.5; cursor: default; }
 
   .log-box { background: #0d1117; border-radius: 5px; padding: 15px; font-family: 'Consolas', 'Courier New', monospace; font-size: 0.8rem; color: #aaa; max-height: 350px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; line-height: 1.6; }
 
@@ -128,8 +122,8 @@ ADMIN_HTML = """
       <div class="card-value" id="memory">-</div>
     </div>
     <div class="card">
-      <div class="card-title">Milvus</div>
-      <div class="card-value" id="milvus">-</div>
+      <div class="card-title">PostgreSQL</div>
+      <div class="card-value" id="db">-</div>
     </div>
     <div class="card">
       <div class="card-title">文件 chunks</div>
@@ -142,7 +136,7 @@ ADMIN_HTML = """
     <div class="info-row"><span class="info-key">啟動時間</span><span class="info-val" id="create_time">-</span></div>
     <div class="info-row"><span class="info-key">Python 版本</span><span class="info-val">3.x</span></div>
     <div class="info-row"><span class="info-key">API 連接埠</span><span class="info-val">%(port)s</span></div>
-    <div class="info-row"><span class="info-key">Milvus Host</span><span class="info-val">localhost:19530</span></div>
+    <div class="info-row"><span class="info-key">資料庫</span><span class="info-val">PostgreSQL + pgvector</span></div>
   </div>
 
   <h2>最近 Log</h2>
@@ -170,16 +164,17 @@ async function loadData() {
     document.getElementById('pid').textContent = data.process?.pid ?? '-';
     document.getElementById('memory').textContent = data.process?.memory_mb != null ? data.process.memory_mb + ' MB' : '-';
 
-    const milvusEl = document.getElementById('milvus');
-    if (data.milvus?.connected) {
-      milvusEl.textContent = '✅ 已連線';
-      milvusEl.className = 'card-value status-ok';
+    const dbEl = document.getElementById('db');
+    if (data.db?.connected) {
+      dbEl.textContent = '✅ 已連線';
+      dbEl.className = 'card-value status-ok';
     } else {
-      milvusEl.textContent = '❌ 未連線';
-      milvusEl.className = 'card-value status-error';
+      dbEl.textContent = '❌ 未連線';
+      dbEl.className = 'card-value status-error';
     }
 
-    document.getElementById('chunks').textContent = data.milvus?.stats?.row_count ?? '-';
+    const stats = data.db?.stats;
+    document.getElementById('chunks').textContent = stats?.chunks ?? '-';
     document.getElementById('create_time').textContent = data.process?.create_time ?? '-';
 
     document.getElementById('log').textContent = logs.lines?.join('\\n') || '(無)';
@@ -212,10 +207,10 @@ async def admin_page():
 async def admin_status():
     """取得服務狀態 JSON"""
     process_info = get_process_info()
-    milvus_info = get_milvus_status()
+    db_info = get_db_status()
     return {
         "process": process_info,
-        "milvus": milvus_info,
+        "db": db_info,
         "timestamp": datetime.now().isoformat(),
     }
 
