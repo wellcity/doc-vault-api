@@ -32,7 +32,7 @@ from parsers.pdf_parser import parse_pdf
 from parsers.word_parser import parse_docx
 from parsers.ppt_parser import parse_pptx
 from parsers.excel_parser import parse_xlsx
-from ppt_generator import generate_ppt
+from ppt_generator import generate_ppt, generate_ppt_from_outline
 from embeddings import get_embedding_provider
 from scraper import scrape as do_scrape
 
@@ -95,6 +95,11 @@ class ExportPptRequest(BaseModel):
     result_ids: list[str]
     output_name: str = "report"
     include_images: bool = True
+
+
+class GeneratePptFromOutlineRequest(BaseModel):
+    outline: dict
+    output_name: str = "presentation"
 
 
 class ScrapeRequest(BaseModel):
@@ -378,6 +383,39 @@ async def scrape_endpoint(req: ScrapeRequest):
         return JSONResponse(result)
     except Exception as e:
         logger.exception("爬蟲錯誤")
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@app.post("/generate/ppt")
+async def generate_ppt_from_outline_endpoint(req: GeneratePptFromOutlineRequest):
+    """
+    根據大綱結構生成 PPT。
+
+    outline 格式：
+    {
+        "title": "報告標題",
+        "subtitle": "副標題（選填）",
+        "author": "作者（選填）",
+        "slides": [
+            {"title": "第一頁標題", "bullets": ["項目一", "項目二"], "notes": "備註（選填）"},
+            ...
+        ]
+    }
+    """
+    try:
+        ppt_bytes = generate_ppt_from_outline(
+            outline=req.outline,
+            output_name=req.output_name,
+        )
+
+        output_filename = f"{req.output_name}.pptx"
+        return StreamingResponse(
+            io.BytesIO(ppt_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{output_filename}"},
+        )
+    except Exception as e:
+        logger.exception("PPT 生成錯誤")
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 

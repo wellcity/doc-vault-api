@@ -159,9 +159,39 @@ curl -X POST http://localhost:5002/scrape \
 }
 ```
 
-### 管理
+### 生成 PPT（從大綱）
 
-| 方法 | 路徑 | 說明 |
+```bash
+curl -X POST http://localhost:5002/generate/ppt \
+  -H "Content-Type: application/json" \
+  -d '{
+    "outline": {
+      "title": "Q2 業務報告",
+      "subtitle": "2025 年第二季",
+      "author": "業務部",
+      "slides": [
+        {"title": "季度回顧", "bullets": ["營收成長 20%", "新客戶 15 家"]},
+        {"title": "下季目標", "bullets": ["營收目標 +30%", "拓展東區市場"]}
+      ]
+    },
+    "output_name": "q2_report"
+  }' \
+  --output q2_report.pptx
+```
+
+Outline 格式欄位：
+
+| 欄位 | 必填 | 說明 |
+|------|------|------|
+| `title` | ✅ | 簡報標題 |
+| `subtitle` | | 副標題 |
+| `author` | | 作者 |
+| `slides` | ✅ | 投影片陣列 |
+| `slides[].title` | ✅ | 投影片標題 |
+| `slides[].bullets` | | 項目符號內容 |
+| `slides[].notes` | | 備註（Speaker Notes） |
+
+### 管理
 |------|------|------|
 | GET | `/collections/stats` | 文件/chunks/使用者統計 |
 | GET | `/permissions/{user_id}` | 查詢使用者的文件權限 |
