@@ -239,6 +239,44 @@ curl -X POST http://localhost:5002/export/pdf \
   --output document_export.pdf
 ```
 
+### 生成 Excel
+
+```bash
+curl -X POST http://localhost:5002/generate/excel \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sheets": [
+      {
+        "name": "員工統計",
+        "headers": ["姓名", "部門", "在職年資"],
+        "data": [
+          ["王小明", "業務部", 3],
+          ["李小華", "人資部", 5]
+        ]
+      },
+      {
+        "name": "費用明細",
+        "headers": ["項目", "金額", "日期"],
+        "data": [
+          ["交通費", 1200, "2025/01/05"],
+          ["交際費", 3500, "2025/01/08"]
+        ]
+      }
+    ],
+    "output_name": "monthly_report",
+    "title": "2025 年 1 月份統計報告"
+  }' \
+  --output monthly_report.xlsx
+```
+
+sheets 格式欄位：
+
+| 欄位 | 必填 | 說明 |
+|------|------|------|
+| `name` | ✅ | 工作表名稱 |
+| `headers` | ✅ | 欄位標題（str 或 dict：label/width/align） |
+| `data` | ✅ | 資料列（list 或 dict 以 headers 為 key） |
+
 ### 管理
 |------|------|------|
 | GET | `/collections/stats` | 文件/chunks/使用者統計 |

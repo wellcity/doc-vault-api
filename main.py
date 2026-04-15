@@ -34,6 +34,7 @@ from parsers.ppt_parser import parse_pptx
 from parsers.excel_parser import parse_xlsx
 from ppt_generator import generate_ppt, generate_ppt_from_outline
 from pdf_generator import generate_pdf_from_outline, generate_pdf_from_chunks
+from excel_generator import generate_excel_from_data
 from embeddings import get_embedding_provider
 from scraper import scrape as do_scrape
 
@@ -111,6 +112,12 @@ class GeneratePdfFromOutlineRequest(BaseModel):
 class GeneratePdfFromChunksRequest(BaseModel):
     result_ids: list[str]
     output_name: str = "document"
+
+
+class GenerateExcelRequest(BaseModel):
+    sheets: list[dict]
+    output_name: str = "report"
+    title: str | None = None
 
 
 class ScrapeRequest(BaseModel):
@@ -492,6 +499,44 @@ async def export_pdf_from_chunks_endpoint(req: GeneratePdfFromChunksRequest):
         raise
     except Exception as e:
         logger.exception("PDF 匯出錯誤")
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@app.post("/generate/excel")
+async def generate_excel_endpoint(req: GenerateExcelRequest):
+    """
+    根據資料結構生成 Excel 報表。
+
+    sheets 格式：
+    [{
+        "name": "工作表名稱",
+        "headers": ["欄位A", "欄位B"],
+        "data": [
+            ["值1", "值2"],
+            ["值3", "值4"]
+        ]
+    }]
+
+    headers 可為 dict 設定寬度與對齊：
+    ["欄位A", {"label": "欄位B", "width": 20, "align": "center"}]
+
+    data 每列可為 list 或 dict（以 headers 為 key）。
+    """
+    try:
+        xlsx_bytes = generate_excel_from_data(
+            sheets=req.sheets,
+            output_name=req.output_name,
+            title=req.title,
+        )
+
+        output_filename = f"{req.output_name}.xlsx"
+        return StreamingResponse(
+            io.BytesIO(xlsx_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{output_filename}"},
+        )
+    except Exception as e:
+        logger.exception("Excel 生成錯誤")
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
