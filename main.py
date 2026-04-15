@@ -35,6 +35,7 @@ from parsers.excel_parser import parse_xlsx
 from ppt_generator import generate_ppt, generate_ppt_from_outline
 from pdf_generator import generate_pdf_from_outline, generate_pdf_from_chunks
 from excel_generator import generate_excel_from_data
+from word_generator import generate_word_from_outline
 from embeddings import get_embedding_provider
 from scraper import scrape as do_scrape
 
@@ -118,6 +119,11 @@ class GenerateExcelRequest(BaseModel):
     sheets: list[dict]
     output_name: str = "report"
     title: str | None = None
+
+
+class GenerateWordRequest(BaseModel):
+    outline: dict
+    output_name: str = "document"
 
 
 class ScrapeRequest(BaseModel):
@@ -537,6 +543,43 @@ async def generate_excel_endpoint(req: GenerateExcelRequest):
         )
     except Exception as e:
         logger.exception("Excel 生成錯誤")
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@app.post("/generate/word")
+async def generate_word_endpoint(req: GenerateWordRequest):
+    """
+    根據大綱結構生成 Word 文件。
+
+    outline 格式：
+    {
+        "title": "文件標題",
+        "subtitle": "副標題（選填）",
+        "author": "作者（選填）",
+        "date": "2025/01/01（選填，預設今天）",
+        "sections": [
+            {
+                "heading": "章節標題",
+                "content": "內文" or ["項目一", "項目二"],
+                "table": [["標題1", "標題2"], ["內容1", "內容2"], ...]（選填）
+            }
+        ]
+    }
+    """
+    try:
+        docx_bytes = generate_word_from_outline(
+            outline=req.outline,
+            output_name=req.output_name,
+        )
+
+        output_filename = f"{req.output_name}.docx"
+        return StreamingResponse(
+            io.BytesIO(docx_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{output_filename}"},
+        )
+    except Exception as e:
+        logger.exception("Word 生成錯誤")
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
