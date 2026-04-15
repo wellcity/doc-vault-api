@@ -191,6 +191,54 @@ Outline 格式欄位：
 | `slides[].bullets` | | 項目符號內容 |
 | `slides[].notes` | | 備註（Speaker Notes） |
 
+### 生成 PDF（從大綱）
+
+```bash
+curl -X POST http://localhost:5002/generate/pdf \
+  -H "Content-Type: application/json" \
+  -d '{
+    "outline": {
+      "title": "人資年度報告",
+      "subtitle": "2025 年度",
+      "author": "人資部",
+      "sections": [
+        {
+          "heading": "一、員工概況",
+          "content": ["目前在職員工共 128 人", "新進員工 15 人", "離職人數 8 人"]
+        },
+        {
+          "heading": "二、數據統計",
+          "table": [["項目", "數值"], ["在職人數", "128"], ["新進", "15"]]
+        }
+      ]
+    },
+    "output_name": "hr_report"
+  }' \
+  --output hr_report.pdf
+```
+
+Outline 格式欄位：
+
+| 欄位 | 必填 | 說明 |
+|------|------|------|
+| `title` | ✅ | 報告標題 |
+| `subtitle` | | 副標題 |
+| `author` | | 作者 |
+| `date` | | 日期（預設今天） |
+| `sections` | ✅ | 章節陣列 |
+| `sections[].heading` | ✅ | 章節標題 |
+| `sections[].content` | | 內文（str 或 list of str） |
+| `sections[].table` | | 表格（list of list） |
+
+### 匯出 PDF（從文件 chunks）
+
+```bash
+curl -X POST http://localhost:5002/export/pdf \
+  -H "Content-Type: application/json" \
+  -d '{"result_ids": ["uuid1", "uuid2"], "output_name": "document_export"}' \
+  --output document_export.pdf
+```
+
 ### 管理
 |------|------|------|
 | GET | `/collections/stats` | 文件/chunks/使用者統計 |

@@ -33,6 +33,7 @@ from parsers.word_parser import parse_docx
 from parsers.ppt_parser import parse_pptx
 from parsers.excel_parser import parse_xlsx
 from ppt_generator import generate_ppt, generate_ppt_from_outline
+from pdf_generator import generate_pdf_from_outline, generate_pdf_from_chunks
 from embeddings import get_embedding_provider
 from scraper import scrape as do_scrape
 
@@ -100,6 +101,16 @@ class ExportPptRequest(BaseModel):
 class GeneratePptFromOutlineRequest(BaseModel):
     outline: dict
     output_name: str = "presentation"
+
+
+class GeneratePdfFromOutlineRequest(BaseModel):
+    outline: dict
+    output_name: str = "report"
+
+
+class GeneratePdfFromChunksRequest(BaseModel):
+    result_ids: list[str]
+    output_name: str = "document"
 
 
 class ScrapeRequest(BaseModel):
@@ -416,6 +427,71 @@ async def generate_ppt_from_outline_endpoint(req: GeneratePptFromOutlineRequest)
         )
     except Exception as e:
         logger.exception("PPT 生成錯誤")
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@app.post("/generate/pdf")
+async def generate_pdf_from_outline_endpoint(req: GeneratePdfFromOutlineRequest):
+    """
+    根據大綱結構生成 PDF 報告。
+
+    outline 格式：
+    {
+        "title": "報告標題",
+        "subtitle": "副標題（選填）",
+        "author": "作者（選填）",
+        "date": "2025/01/01（選填，預設今天）",
+        "sections": [
+            {
+                "heading": "章節標題",
+                "content": "內文" or ["項目一", "項目二"],
+                "table": [["標題", "內容"], ...]（選填）
+            }
+        ]
+    }
+    """
+    try:
+        pdf_bytes = generate_pdf_from_outline(
+            outline=req.outline,
+            output_name=req.output_name,
+        )
+
+        output_filename = f"{req.output_name}.pdf"
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{output_filename}"},
+        )
+    except Exception as e:
+        logger.exception("PDF 生成錯誤")
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@app.post("/export/pdf")
+async def export_pdf_from_chunks_endpoint(req: GeneratePdfFromChunksRequest):
+    """
+    將向量搜尋結果（chunks）匯出為 PDF 文件。
+    """
+    try:
+        chunks = get_chunks_by_ids(req.result_ids)
+        if not chunks:
+            raise HTTPException(status_code=404, detail={"error": "找不到指定的 chunks"})
+
+        pdf_bytes = generate_pdf_from_chunks(
+            chunks=chunks,
+            output_name=req.output_name,
+        )
+
+        output_filename = f"{req.output_name}.pdf"
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{output_filename}"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("PDF 匯出錯誤")
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
