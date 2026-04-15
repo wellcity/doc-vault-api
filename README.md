@@ -128,6 +128,37 @@ curl -X POST http://localhost:5002/export/ppt \
   --output report.pptx
 ```
 
+### 爬蟲
+
+```bash
+# 基本爬取
+curl -X POST http://localhost:5002/scrape \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://news.ycombinator.com/"}'
+
+# 指定 CSS 選擇器，只取特定區塊
+curl -X POST http://localhost:5002/scrape \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "selector": "article.content"}'
+
+# 同時回傳連結清單
+curl -X POST http://localhost:5002/scrape \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://news.ycombinator.com/", "extract_links": true}'
+```
+
+回應格式：
+
+```json
+{
+  "url": "https://...",
+  "status_code": 200,
+  "title": "頁面標題",
+  "text": "純文字內容...",
+  "links": [{"text": "連結文字", "href": "https://..."}]
+}
+```
+
 ### 管理
 
 | 方法 | 路徑 | 說明 |
@@ -173,6 +204,7 @@ doc-vault-api/
 ├── embeddings.py        # Embedding Provider（工廠模式）
 ├── vector_store.py      # pgvector 操作
 ├── ppt_generator.py     # PPT 生成
+├── scraper.py           # 網頁爬蟲
 ├── admin_routes.py      # Web Admin 管理介面
 ├── parsers/             # 文件解析器
 │   ├── pdf_parser.py

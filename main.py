@@ -9,6 +9,7 @@ import os
 import io
 import uuid
 import time
+import json
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -33,6 +34,7 @@ from parsers.ppt_parser import parse_pptx
 from parsers.excel_parser import parse_xlsx
 from ppt_generator import generate_ppt
 from embeddings import get_embedding_provider
+from scraper import scrape as do_scrape
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -93,6 +95,13 @@ class ExportPptRequest(BaseModel):
     result_ids: list[str]
     output_name: str = "report"
     include_images: bool = True
+
+
+class ScrapeRequest(BaseModel):
+    url: str
+    selector: str | None = None  # CSS 選擇器，只取符合的元素
+    extract_links: bool = False   # 是否一併回傳連結清單
+    timeout: float = 30.0        # 請求逾時（秒）
 
 
 # ======================== 工具函式 ========================
@@ -346,6 +355,29 @@ async def export_ppt(req: ExportPptRequest):
         raise
     except Exception as e:
         logger.exception("匯出錯誤")
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@app.post("/scrape")
+async def scrape_endpoint(req: ScrapeRequest):
+    """
+    爬取公開網頁內容。
+
+    - url：目標網址
+    - selector：CSS 選擇器，只取符合的元素（選填）
+    - extract_links：是否回傳連結清單（預設 False）
+    - timeout：請求逾時，預設 30 秒
+    """
+    try:
+        result = await do_scrape(
+            url=req.url,
+            selector=req.selector,
+            extract_links_flag=req.extract_links,
+            timeout=req.timeout,
+        )
+        return JSONResponse(result)
+    except Exception as e:
+        logger.exception("爬蟲錯誤")
         raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
