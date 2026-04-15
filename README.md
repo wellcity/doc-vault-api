@@ -1,12 +1,12 @@
 # DocVault API
 
-文件向量資料庫 API。將文件（PDF、Word、PowerPoint、Excel）建置至 PostgreSQL 向量資料庫（pgvector），提供搜尋與 PPT 匯出功能，支援文件機密等級與使用者權限控制。
+文件向量資料庫 API。將文件（PDF、Word、PowerPoint、Excel）建置至 PostgreSQL 向量資料庫（pgvector），提供搜尋、爬蟲、與 Office 文件生成功能，支援文件機密等級與使用者權限控制。
 
 ## 系統需求
 
 - Python 3.10+
 - PostgreSQL 16+（含 pgvector extension）
-- Ollama / OpenAI API / sentence-transformers（向量化的 embedding 模型）
+- sentence-transformers / Ollama / OpenAI（向量化模型）
 
 ## 快速開始
 
@@ -40,7 +40,7 @@ POSTGRES_USER=postgres
 POSTGRES_PASSWORD=docvault123
 
 # Embedding Provider（三選一）
-EMBEDDING_PROVIDER=local        # 建議（已內建sentence-transformers）
+EMBEDDING_PROVIDER=local        # 建議（已內建 sentence-transformers）
 # EMBEDDING_PROVIDER=ollama
 # EMBEDDING_PROVIDER=openai
 
@@ -49,7 +49,7 @@ OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 
 # OpenAI（EMBEDDING_PROVIDER=openai 時使用）
-OPENAI_API_KEY=sk-xxx
+OPENAI_API_KEY=***
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 
 # 本地模型（EMBEDDING_PROVIDER=local 時使用）
@@ -75,7 +75,27 @@ python main.py
 curl http://localhost:5002/health
 ```
 
-## API 端點
+## API 端點總覽
+
+|| 方法 | 路徑 | 說明 |
+|------|------|------|------|
+|| GET | `/health` | 健康檢查 |
+|| POST | `/ingest` | 上傳檔案入庫 |
+|| POST | `/search` | 向量搜尋文件 |
+|| POST | `/permissions/sync` | 同步使用者權限 |
+|| GET | `/permissions/{user_id}` | 查詢使用者權限 |
+|| POST | `/export/ppt` | 將搜尋結果匯出為 PPT |
+|| POST | `/scrape` | 爬取公開網頁 |
+|| POST | `/generate/ppt` | 從大綱生成 PPT |
+|| POST | `/generate/pdf` | 從大綱生成 PDF |
+|| POST | `/export/pdf` | 將搜尋結果匯出為 PDF |
+|| POST | `/generate/excel` | 從資料生成 Excel |
+|| POST | `/generate/word` | 從大綱生成 Word |
+|| GET | `/collections/stats` | 統計資訊 |
+|| DELETE | `/collection/{file_id}` | 刪除檔案 |
+|| GET | `/admin` | Web 管理介面 |
+
+## 功能說明
 
 ### 入庫
 
@@ -107,7 +127,6 @@ curl -X POST http://localhost:5002/search \
 ### 權限同步
 
 ```bash
-# 原系統同步使用者權限
 curl -X POST http://localhost:5002/permissions/sync \
   -H "Content-Type: application/json" \
   -d '{
@@ -117,15 +136,6 @@ curl -X POST http://localhost:5002/permissions/sync \
       {"document_id": "doc_xyz", "access_level": "read"}
     ]
   }'
-```
-
-### 匯出 PPT
-
-```bash
-curl -X POST http://localhost:5002/export/ppt \
-  -H "Content-Type: application/json" \
-  -d '{"result_ids": ["uuid1", "uuid2"], "output_name": "我的報告", "include_images": true}' \
-  --output report.pptx
 ```
 
 ### 爬蟲
@@ -179,17 +189,17 @@ curl -X POST http://localhost:5002/generate/ppt \
   --output q2_report.pptx
 ```
 
-Outline 格式欄位：
+outline 欄位：
 
-| 欄位 | 必填 | 說明 |
-|------|------|------|
-| `title` | ✅ | 簡報標題 |
-| `subtitle` | | 副標題 |
-| `author` | | 作者 |
-| `slides` | ✅ | 投影片陣列 |
-| `slides[].title` | ✅ | 投影片標題 |
-| `slides[].bullets` | | 項目符號內容 |
-| `slides[].notes` | | 備註（Speaker Notes） |
+|| 欄位 | 必填 | 說明 |
+||------|------|------|
+|| `title` | ✅ | 簡報標題 |
+|| `subtitle` | | 副標題 |
+|| `author` | | 作者 |
+|| `slides` | ✅ | 投影片陣列 |
+|| `slides[].title` | ✅ | 投影片標題 |
+|| `slides[].bullets` | | 項目符號內容 |
+|| `slides[].notes` | | 備註（Speaker Notes） |
 
 ### 生成 PDF（從大綱）
 
@@ -217,18 +227,18 @@ curl -X POST http://localhost:5002/generate/pdf \
   --output hr_report.pdf
 ```
 
-Outline 格式欄位：
+outline 欄位：
 
-| 欄位 | 必填 | 說明 |
-|------|------|------|
-| `title` | ✅ | 報告標題 |
-| `subtitle` | | 副標題 |
-| `author` | | 作者 |
-| `date` | | 日期（預設今天） |
-| `sections` | ✅ | 章節陣列 |
-| `sections[].heading` | ✅ | 章節標題 |
-| `sections[].content` | | 內文（str 或 list of str） |
-| `sections[].table` | | 表格（list of list） |
+|| 欄位 | 必填 | 說明 |
+||------|------|------|
+|| `title` | ✅ | 報告標題 |
+|| `subtitle` | | 副標題 |
+|| `author` | | 作者 |
+|| `date` | | 日期（預設今天） |
+|| `sections` | ✅ | 章節陣列 |
+|| `sections[].heading` | ✅ | 章節標題 |
+|| `sections[].content` | | 內文（str 或 list of str） |
+|| `sections[].table` | | 表格（list of list） |
 
 ### 匯出 PDF（從文件 chunks）
 
@@ -269,45 +279,86 @@ curl -X POST http://localhost:5002/generate/excel \
   --output monthly_report.xlsx
 ```
 
-sheets 格式欄位：
+sheets 欄位：
 
-| 欄位 | 必填 | 說明 |
-|------|------|------|
-| `name` | ✅ | 工作表名稱 |
-| `headers` | ✅ | 欄位標題（str 或 dict：label/width/align） |
-| `data` | ✅ | 資料列（list 或 dict 以 headers 為 key） |
+|| 欄位 | 必填 | 說明 |
+||------|------|------|
+|| `name` | ✅ | 工作表名稱 |
+|| `headers` | ✅ | 欄位標題（str 或 dict：label/width/align） |
+|| `data` | ✅ | 資料列（list 或 dict 以 headers 為 key） |
 
-### 管理
-|------|------|------|
-| GET | `/collections/stats` | 文件/chunks/使用者統計 |
-| GET | `/permissions/{user_id}` | 查詢使用者的文件權限 |
-| DELETE | `/collection/{file_id}` | 刪除檔案所有 chunks |
-| GET | `/admin` | Web 管理介面 |
-| GET | `/health` | 健康檢查 |
+### 生成 Word（從大綱）
+
+```bash
+curl -X POST http://localhost:5002/generate/word \
+  -H "Content-Type: application/json" \
+  -d '{
+    "outline": {
+      "title": "人資年度報告",
+      "subtitle": "2025 年度",
+      "author": "人資部",
+      "sections": [
+        {
+          "heading": "一、員工概況",
+          "content": "目前在職員工共 128 人，新進員工 15 人，離職人數 8 人。"
+        },
+        {
+          "heading": "二、各部門人數",
+          "table": [["部門", "人數"], ["業務部", "45"], ["人資部", "8"]]
+        }
+      ]
+    },
+    "output_name": "hr_report"
+  }' \
+  --output hr_report.docx
+```
+
+outline 欄位：
+
+|| 欄位 | 必填 | 說明 |
+||------|------|------|
+|| `title` | ✅ | 文件標題 |
+|| `subtitle` | | 副標題 |
+|| `author` | | 作者 |
+|| `date` | | 日期（預設今天） |
+|| `sections` | ✅ | 章節陣列 |
+|| `sections[].heading` | ✅ | 章節標題 |
+|| `sections[].content` | | 內文（str 或 list of str） |
+|| `sections[].table` | | 表格（list of list） |
+
+### 匯出 PPT（從文件 chunks）
+
+```bash
+curl -X POST http://localhost:5002/export/ppt \
+  -H "Content-Type: application/json" \
+  -d '{"result_ids": ["uuid1", "uuid2"], "output_name": "我的報告", "include_images": true}' \
+  --output report.pptx
+```
 
 ## 支援格式
 
-| 格式 | 副檔名 | 說明 |
-|------|--------|------|
-| PDF | `.pdf` | 每段或每頁為一個 chunk |
-| Word | `.docx` | 段落 + 表格萃取 |
-| PowerPoint | `.pptx` | 每張投影片為一個 chunk |
-| Excel | `.xlsx` | 每個工作表為一個 chunk |
+|| 格式 | 副檔名 | 說明 |
+||------|--------|------|
+|| PDF | `.pdf` | 每段或每頁為一個 chunk |
+|| Word | `.docx` | 段落 + 表格萃取 |
+|| PowerPoint | `.pptx` | 每張投影片為一個 chunk |
+|| Excel | `.xlsx` | 每個工作表為一個 chunk |
 
 ## 與 McpServerIIS 整合
-
-McpServerIIS（.NET MCP 伺服器）可透過 HTTP 呼叫本 API：
 
 ```
 AI Agent
     │  MCP Protocol
     ▼
-McpServerIIS（.NET 8）
+McpServerIIS（.NET 8，IIS 部署）
     │  HTTP（port 5002）
     ▼
 DocVault API（本專案）
     │
-    └── PostgreSQL（向量 + 權限 + metadata）
+    ├── 文件解析（PDF / Word / PPT / Excel）
+    ├── 向量儲存（PostgreSQL + pgvector）
+    ├── 爬蟲（httpx + BeautifulSoup）
+    └── 文件生成（PPT / PDF / Excel / Word）
 ```
 
 ## 目錄結構
@@ -319,8 +370,11 @@ doc-vault-api/
 ├── db.py                # PostgreSQL 連線與 schema
 ├── embeddings.py        # Embedding Provider（工廠模式）
 ├── vector_store.py      # pgvector 操作
-├── ppt_generator.py     # PPT 生成
-├── scraper.py           # 網頁爬蟲
+├── scraper.py          # 網頁爬蟲
+├── ppt_generator.py    # PPT 生成
+├── pdf_generator.py    # PDF 生成
+├── excel_generator.py  # Excel 生成
+├── word_generator.py   # Word 生成
 ├── admin_routes.py      # Web Admin 管理介面
 ├── parsers/             # 文件解析器
 │   ├── pdf_parser.py
@@ -328,8 +382,8 @@ doc-vault-api/
 │   ├── ppt_parser.py
 │   └── excel_parser.py
 ├── processed/           # 處理過的資料
-│   └── images/          # 萃取的圖片
-├── output/              # 輸出檔案
+│   └── images/         # 萃取的圖片
+├── output/             # 輸出檔案
 ├── requirements.txt
 └── windows-service-setup.md
 ```
@@ -341,7 +395,6 @@ doc-vault-api/
 ### 本地模型（預設，離線可用）
 
 ```bash
-# sentence-transformers 會自動下載模型
 EMBEDDING_PROVIDER=local
 LOCAL_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 LOCAL_EMBEDDING_DIM=384
@@ -360,10 +413,15 @@ ollama pull nomic-embed-text
 ollama serve
 ```
 
+```bash
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+```
+
 ### OpenAI
 
 ```bash
-OPENAI_API_KEY=sk-xxx
+OPENAI_API_KEY=***
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 ```
 
