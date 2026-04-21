@@ -46,8 +46,8 @@ EMBEDDING_PROVIDER=openai        # 建議（LM Studio 或 OpenAI API）
 
 # LM Studio / OpenAI（EMBEDDING_PROVIDER=openai 時使用）
 OPENAI_API_KEY=lm-studio         # LM Studio 可用任意值，Base URL 對即可
-OPENAI_BASE_URL=http://26.26.26.1:1234/v1
-OPENAI_EMBEDDING_MODEL=text-embedding-qwen3-8b-text-embedding
+OPENAI_BASE_URL=http://localhost:1234/v1
+OPENAI_EMBEDDING_MODEL=Qwen3-Embedding-8B-GGUF
 
 # Ollama（EMBEDDING_PROVIDER=ollama 時使用）
 OLLAMA_BASE_URL=http://localhost:11434
