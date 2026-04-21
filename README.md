@@ -6,7 +6,7 @@
 
 - Python 3.10+
 - PostgreSQL 16+（含 pgvector extension）
-- sentence-transformers / Ollama / OpenAI（向量化模型）
+- sentence-transformers / Ollama / LM Studio / OpenAI（向量化模型）
 
 ## 快速開始
 
@@ -35,22 +35,23 @@ docker run -d --name docvault-postgres \
 # PostgreSQL
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
-POSTGRES_DB=docvault
+POSTGRES_DB=postgres
 POSTGRES_USER=postgres
-POSTGRES_PASSWORD=docvault123
+POSTGRES_PASSWORD=***
 
 # Embedding Provider（三選一）
-EMBEDDING_PROVIDER=local        # 建議（已內建 sentence-transformers）
+EMBEDDING_PROVIDER=openai        # 建議（LM Studio 或 OpenAI API）
 # EMBEDDING_PROVIDER=ollama
-# EMBEDDING_PROVIDER=openai
+# EMBEDDING_PROVIDER=local
+
+# LM Studio / OpenAI（EMBEDDING_PROVIDER=openai 時使用）
+OPENAI_API_KEY=lm-studio         # LM Studio 可用任意值，Base URL 對即可
+OPENAI_BASE_URL=http://26.26.26.1:1234/v1
+OPENAI_EMBEDDING_MODEL=text-embedding-qwen3-8b-text-embedding
 
 # Ollama（EMBEDDING_PROVIDER=ollama 時使用）
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_EMBEDDING_MODEL=nomic-embed-text
-
-# OpenAI（EMBEDDING_PROVIDER=openai 時使用）
-OPENAI_API_KEY=***
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 
 # 本地模型（EMBEDDING_PROVIDER=local 時使用）
 LOCAL_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
@@ -390,17 +391,32 @@ doc-vault-api/
 
 ## Embedding Provider
 
-支援三種模式，透過 `EMBEDDING_PROVIDER` 設定切換：
+支援三種模式，透過 `EMBEDDING_PROVIDER` 設定切換。向量維度自動偵測，支援任意維度的 embedding 模型。
 
-### 本地模型（預設，離線可用）
+### LM Studio / OpenAI（預設）
+
+```bash
+# LM Studio（建議，本地 GPU 加速）
+# 下載模型後，在 LM Studio 中載入並啟動 Server（預設 port 1234）
+EMBEDDING_PROVIDER=openai
+OPENAI_API_KEY=lm-studio         # LM Studio 不驗證 API key，任意值即可
+OPENAI_BASE_URL=http://26.26.26.1:1234/v1
+OPENAI_EMBEDDING_MODEL=text-embedding-qwen3-8b-text-embedding
+
+# OpenAI API
+EMBEDDING_PROVIDER=openai
+OPENAI_API_KEY=sk-***
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+```
+
+### 本地模型（離線可用）
 
 ```bash
 EMBEDDING_PROVIDER=local
 LOCAL_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 LOCAL_EMBEDDING_DIM=384
 ```
-
-### Ollama
 
 ```bash
 # 安裝 Ollama
@@ -440,6 +456,7 @@ CREATE TABLE documents (
 );
 
 -- Chunks 表（含向量）
+-- 向量維度由首次 init_db 時自動偵測（可用任何維度的 embedding 模型）
 CREATE TABLE document_chunks (
     chunk_id      VARCHAR(64) PRIMARY KEY,
     file_id       VARCHAR(64) REFERENCES documents(file_id) ON DELETE CASCADE,
@@ -447,7 +464,7 @@ CREATE TABLE document_chunks (
     chunk_index   INTEGER,
     text          TEXT,
     image_paths   TEXT[],
-    text_vector   VECTOR(384),   -- pgvector 向量
+    text_vector   VECTOR,       -- 維度自動偵測（支援 HNSW / IVFFlat 索引）
     created_at    TIMESTAMP
 );
 
