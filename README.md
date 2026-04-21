@@ -341,7 +341,7 @@ curl -X POST http://localhost:5002/export/ppt \
 || 格式 | 副檔名 | 說明 |
 ||------|--------|------|
 || PDF | `.pdf` | 每段或每頁為一個 chunk |
-|| Word | `.docx` | 段落 + 表格萃取 |
+|| Word | `.doc` `.docx` | 段落 + 表格萃取（`.doc` 自動轉 `.docx`） |
 || PowerPoint | `.pptx` | 每張投影片為一個 chunk |
 || Excel | `.xlsx` | 每個工作表為一個 chunk |
 

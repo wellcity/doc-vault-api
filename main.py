@@ -177,17 +177,8 @@ async def ingest(
         except Exception:
             pass
 
-    # 副檔名檢查（包含 .doc 明確拒絕指引）
+    # 副檔名檢查（.doc 透過 LibreOffice 轉換為 .docx 後解析）
     file_ext = get_file_ext(file.filename or "unknown")
-    if file_ext == ".doc":
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "Unsupported file type",
-                "message": "不支援 .doc 格式，請將文件另存為 .docx 後再上傳。",
-                "supported": [".pdf", ".docx", ".pptx", ".xlsx"],
-            },
-        )
     if file_ext not in {".pdf", ".docx", ".pptx", ".xlsx"}:
         raise HTTPException(
             status_code=400,
@@ -240,10 +231,32 @@ async def ingest(
     temp_dir = Path("/tmp/docvault")
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp_path = temp_dir / f"{file_id}{file_ext}"
+    converted_docx = None  # 追蹤轉換後的 .docx 暫存檔
 
     try:
         with open(temp_path, "wb") as f:
             f.write(content)
+
+        # .doc 格式：透過 LibreOffice 轉換為 .docx 再解析
+        if file_ext == ".doc":
+            from parsers.convert_doc import convert_doc_to_docx
+            try:
+                converted_docx = convert_doc_to_docx(str(temp_path))
+                logger.info(f".doc 轉換成功：{converted_docx}")
+                # 更新解析路徑與副檔名
+                temp_path = Path(converted_docx)
+                file_ext = ".docx"
+            except FileNotFoundError as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "error": "LibreOffice not found",
+                        "message": str(e),
+                        "hint": "請在 Windows 伺服器上安裝 LibreOffice：https://www.libreoffice.org/download/download/",
+                    },
+                )
+            except RuntimeError as e:
+                raise HTTPException(status_code=400, detail={"error": f".doc 轉換失敗：{str(e)}"})
 
         # 解析
         chunks, image_paths = parse_file(str(temp_path), file_id, file_ext, meta)
@@ -286,6 +299,9 @@ async def ingest(
     finally:
         if temp_path.exists():
             os.remove(temp_path)
+        if converted_docx and Path(converted_docx).exists():
+            os.remove(converted_docx)
+            Path(converted_docx).parent.rmdir()  # 嘗試刪除空目錄
 
 
 @app.post("/search")
