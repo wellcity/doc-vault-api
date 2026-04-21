@@ -13,6 +13,7 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
 # Embedding 設定
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "ollama")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
 # Ollama（EMBEDDING_PROVIDER=ollama 時使用）

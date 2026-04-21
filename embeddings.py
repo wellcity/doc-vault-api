@@ -7,7 +7,7 @@ sys.path.append(".")
 
 import logging
 from abc import ABC, abstractmethod
-from config import EMBEDDING_PROVIDER, OPENAI_API_KEY, OPENAI_EMBEDDING_MODEL, \
+from config import EMBEDDING_PROVIDER, OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_EMBEDDING_MODEL, \
     OLLAMA_BASE_URL, OLLAMA_EMBEDDING_MODEL, \
     LOCAL_EMBEDDING_MODEL, LOCAL_EMBEDDING_DIM
 
@@ -28,9 +28,12 @@ def _build_provider() -> "EmbeddingProvider":
     logger.info(f"初始化 Embedding Provider：{provider}")
 
     if provider == "openai":
-        if not OPENAI_API_KEY:
+        # LM Studio（OpenAI-compatible）通常不需要真實 API key，
+        # 只要有 OPENAI_BASE_URL 即可用占位 key。
+        if not OPENAI_API_KEY and not OPENAI_BASE_URL:
             raise ValueError("EMBEDDING_PROVIDER=openai 但未設定 OPENAI_API_KEY")
-        return OpenAIEmbeddingProvider(OPENAI_API_KEY, OPENAI_EMBEDDING_MODEL)
+        api_key = OPENAI_API_KEY or "lm-studio"
+        return OpenAIEmbeddingProvider(api_key, OPENAI_EMBEDDING_MODEL, OPENAI_BASE_URL or None)
 
     elif provider == "ollama":
         return OllamaEmbeddingProvider(OLLAMA_BASE_URL, OLLAMA_EMBEDDING_MODEL)
@@ -55,9 +58,18 @@ class EmbeddingProvider(ABC):
 
 
 class OpenAIEmbeddingProvider(EmbeddingProvider):
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, base_url: str | None = None):
         from openai import OpenAI
-        self.client = OpenAI(api_key=api_key)
+        import httpx
+
+        # 這裡特別關閉 trust_env，避免環境變數（例如 http_proxy/https_proxy）
+        # 影響到連到 LM Studio 的行為，導致連線被強制中斷。
+        http_client = httpx.Client(timeout=60.0, trust_env=False)
+
+        if base_url:
+            self.client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
+        else:
+            self.client = OpenAI(api_key=api_key, http_client=http_client)
         self.model = model
 
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -65,9 +77,11 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         return [item.embedding for item in resp.data]
 
     def dimension(self) -> int:
-        # text-embedding-3-small = 1536
-        dims = {"text-embedding-3-small": 1536, "text-embedding-3-large": 3072, "text-embedding-ada-002": 1536}
-        return dims.get(self.model, 1536)
+        # 動態取得向量維度，避免不同 embedding 模型輸出維度不一致。
+        if not hasattr(self, "_dim"):
+            vectors = self.embed(["dim"])
+            self._dim = len(vectors[0]) if vectors and vectors[0] else 0
+        return self._dim
 
 
 class OllamaEmbeddingProvider(EmbeddingProvider):

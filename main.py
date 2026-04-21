@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import nest_asyncio
+import psycopg2
 
 try:
     nest_asyncio.apply()
@@ -234,7 +235,14 @@ async def ingest(
             chunk["embedding"] = vectors[0]
 
         # 寫入 PostgreSQL
-        insert_chunks(chunks)
+        try:
+            insert_chunks(chunks)
+        except psycopg2.errors.UndefinedTable:
+            # 常見狀況：你曾手動刪掉 tables，或 init_db 由於啟動時錯誤未能完成。
+            # 這裡做一次自動重建，讓 ingest 更穩定。
+            logger.warning("document_chunks 表不存在，嘗試自動 init_db 重建後再寫入...")
+            init_db()
+            insert_chunks(chunks)
 
         elapsed_ms = int((time.time() - start) * 1000)
 

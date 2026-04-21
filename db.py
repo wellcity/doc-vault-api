@@ -68,13 +68,20 @@ def init_db(vector_dim: int = None):
                         created_at    TIMESTAMP DEFAULT NOW()
                     )
                 """)
-                # IVFFlat 索引（效能較 HNSW 好建立）
-                cur.execute(f"""
-                    CREATE INDEX idx_chunks_vector
-                    ON document_chunks
-                    USING ivfflat (text_vector vector_cosine_ops)
-                    WITH (lists = 100)
-                """)
+                # pgvector 的 ivfflat 在高維度（>2000）會失敗，改用 HNSW。
+                if vector_dim > 2000:
+                    cur.execute("""
+                        CREATE INDEX idx_chunks_vector
+                        ON document_chunks
+                        USING hnsw (text_vector vector_cosine_ops)
+                    """)
+                else:
+                    cur.execute("""
+                        CREATE INDEX idx_chunks_vector
+                        ON document_chunks
+                        USING ivfflat (text_vector vector_cosine_ops)
+                        WITH (lists = 100)
+                    """)
 
             # 使用者權限表
             cur.execute("""
