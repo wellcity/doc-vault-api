@@ -160,17 +160,34 @@ def get_file_ext(filename: str) -> str:
 async def health():
     return {"status": "ok"}
 
-
 @app.post("/ingest")
 async def ingest(
     file: UploadFile = File(...),
     metadata: str | None = Form(default=None),
 ):
-    """上傳檔案入庫"""
+    """上傳檔案入庫（content_hash 去重）"""
     start = time.time()
-    file_id = str(uuid.uuid4())
-    file_ext = get_file_ext(file.filename or "unknown")
+    import hashlib
 
+    # 解析 metadata（提前到副檔名檢查之前）
+    meta = {}
+    if metadata:
+        try:
+            meta = json.loads(metadata)
+        except Exception:
+            pass
+
+    # 副檔名檢查（包含 .doc 明確拒絕指引）
+    file_ext = get_file_ext(file.filename or "unknown")
+    if file_ext == ".doc":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Unsupported file type",
+                "message": "不支援 .doc 格式，請將文件另存為 .docx 後再上傳。",
+                "supported": [".pdf", ".docx", ".pptx", ".xlsx"],
+            },
+        )
     if file_ext not in {".pdf", ".docx", ".pptx", ".xlsx"}:
         raise HTTPException(
             status_code=400,
@@ -180,38 +197,44 @@ async def ingest(
             },
         )
 
-    # 解析 metadata
-    meta = {}
-    if metadata:
-        try:
-            meta = json.loads(metadata)
-        except Exception:
-            pass
-
-    # confidentiality 寫入 documents 表
+    # 讀取內容並計算 content_hash（用於去重）
+    content = await file.read()
+    content_hash = hashlib.sha256(content).hexdigest()[:32]
+    file_id = str(uuid.uuid4())
     confidentiality = meta.get("confidentiality", "公開")
     department = meta.get("department", "")
 
-    # 寫入 documents 表
+    # 先查是否已有相同 content_hash 的檔案（去重）
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO documents (file_id, filename, file_type, confidentiality, department, metadata_json)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (file_id) DO UPDATE
-                    SET filename = EXCLUDED.filename,
-                        confidentiality = EXCLUDED.confidentiality,
-                        department = EXCLUDED.department,
-                        metadata_json = EXCLUDED.metadata_json
-            """, (file_id, file.filename or "unknown", file_ext.lstrip("."), confidentiality, department, json.dumps(meta)))
+            cur.execute(
+                "SELECT file_id FROM documents WHERE content_hash = %s LIMIT 1",
+                (content_hash,),
+            )
+            row = cur.fetchone()
+            if row:
+                file_id = row[0]
+                logger.info(f"發現重複檔案，複用 file_id={file_id}")
+            else:
+                # 寫入 documents 表
+                cur.execute("""
+                    INSERT INTO documents (file_id, content_hash, filename, file_type, confidentiality, department, metadata_json)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (file_id) DO UPDATE
+                        SET filename = EXCLUDED.filename,
+                            confidentiality = EXCLUDED.confidentiality,
+                            department = EXCLUDED.department,
+                            metadata_json = EXCLUDED.metadata_json,
+                            content_hash = EXCLUDED.content_hash
+                """, (file_id, content_hash, file.filename or "unknown", file_ext.lstrip("."), confidentiality, department, json.dumps(meta)))
 
-            # 如果有指定 document_id（旧格式相容），也更新
-            doc_id = meta.get("document_id")
-            if doc_id and doc_id != file_id:
-                cur.execute("UPDATE documents SET file_id = %s WHERE file_id = %s", (doc_id, file_id))
-                file_id = doc_id
+                # 舊格式相容：document_id
+                doc_id = meta.get("document_id")
+                if doc_id and doc_id != file_id:
+                    cur.execute("UPDATE documents SET file_id = %s WHERE file_id = %s", (doc_id, file_id))
+                    file_id = doc_id
 
-            conn.commit()
+                conn.commit()
 
     # 儲存暫存檔
     temp_dir = Path("/tmp/docvault")
@@ -219,7 +242,6 @@ async def ingest(
     temp_path = temp_dir / f"{file_id}{file_ext}"
 
     try:
-        content = await file.read()
         with open(temp_path, "wb") as f:
             f.write(content)
 
@@ -228,18 +250,17 @@ async def ingest(
         chunk_count = len(chunks)
         image_count = len(image_paths)
 
-        # 向量化
+        # 向量化（批次一次送出，大幅減少 HTTP 往返）
         embed = get_embedding_provider()
-        for chunk in chunks:
-            vectors = embed.embed([chunk["text"][:8000]])
-            chunk["embedding"] = vectors[0]
+        texts_for_embed = [c["text"][:8000] for c in chunks]
+        vectors = embed.embed(texts_for_embed)
+        for chunk, vec in zip(chunks, vectors):
+            chunk["embedding"] = vec
 
         # 寫入 PostgreSQL
         try:
             insert_chunks(chunks)
         except psycopg2.errors.UndefinedTable:
-            # 常見狀況：你曾手動刪掉 tables，或 init_db 由於啟動時錯誤未能完成。
-            # 這裡做一次自動重建，讓 ingest 更穩定。
             logger.warning("document_chunks 表不存在，嘗試自動 init_db 重建後再寫入...")
             init_db()
             insert_chunks(chunks)

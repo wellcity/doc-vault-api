@@ -92,19 +92,26 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
         self._client = httpx.Client(timeout=60.0)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        import httpx
-        vectors = []
-        for text in texts:
+        """批次取得 embedding，減少 HTTP 往返（使用執行緒池並發）"""
+        import concurrent.futures
+
+        def _single(text: str) -> list[float]:
             resp = self._client.post(
                 f"{self.base_url}/api/embeddings",
                 json={"model": self.model, "prompt": text},
             )
             resp.raise_for_status()
-            vectors.append(resp.json()["embedding"])
-        return vectors
+            return resp.json()["embedding"]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(_single, text): i for i, text in enumerate(texts)}
+            results = [None] * len(texts)
+            for future in concurrent.futures.as_completed(futures):
+                idx = futures[future]
+                results[idx] = future.result()
+        return results
 
     def dimension(self) -> int:
-        # 先呼叫一次取得維度（快取）
         if not hasattr(self, "_dim"):
             resp = self._client.post(
                 f"{self.base_url}/api/embeddings",

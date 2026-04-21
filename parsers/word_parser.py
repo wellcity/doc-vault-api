@@ -9,6 +9,18 @@ from datetime import datetime, timezone
 import json
 
 
+def chunk_text(text: str, max_len: int = 8000, overlap: int = 200) -> list[str]:
+    if len(text) <= max_len:
+        return [text]
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + max_len
+        chunks.append(text[start:end])
+        start = end - overlap
+    return chunks
+
+
 def parse_docx(file_path: str, file_id: str, metadata: dict | None = None) -> tuple[list[dict], list[str]]:
     """
     解析 Word (.docx) 檔案，回傳 (chunks, image_paths)
@@ -40,6 +52,17 @@ def parse_docx(file_path: str, file_id: str, metadata: dict | None = None) -> tu
             for shape in run._element.xpath('.//pic:blip', namespaces={'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture'}):
                 pass  # python-docx 圖片萃取較複雜，先留空
 
+        # 超長段落（>8000字）直接用 chunk_text 切成 sub-chunks
+        if len(text) > 8000:
+            if current_text.strip():
+                chunks.append(_make_chunk(file_id, Path(file_path).name, "word", para_count, chunk_index, current_text.strip(), [], metadata))
+                chunk_index += 1
+                current_text = ""
+            for sub_text in chunk_text(text, max_len=8000, overlap=200):
+                chunks.append(_make_chunk(file_id, Path(file_path).name, "word", para_count, chunk_index, sub_text, [], metadata))
+                chunk_index += 1
+            continue
+
         if len(current_text) + len(text) <= 800:
             current_text += text + "\n"
         else:
@@ -50,6 +73,7 @@ def parse_docx(file_path: str, file_id: str, metadata: dict | None = None) -> tu
 
     if current_text.strip():
         chunks.append(_make_chunk(file_id, Path(file_path).name, "word", para_count, chunk_index, current_text.strip(), [], metadata))
+        chunk_index += 1
 
     # 萃取表格中的文字
     for table in doc.tables:

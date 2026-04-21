@@ -444,9 +444,10 @@ OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 ## 資料庫 Schema
 
 ```sql
--- 文件主表
+-- 文件主表（content_hash 為 SHA256，用於去重）
 CREATE TABLE documents (
     file_id         VARCHAR(64) PRIMARY KEY,
+    content_hash    VARCHAR(64),      -- SHA256 hash，同一檔案不會重複入庫
     filename        VARCHAR(256),
     file_type       VARCHAR(16),
     confidentiality VARCHAR(32),  -- 公開 / 內部 / 機密 / 極機密

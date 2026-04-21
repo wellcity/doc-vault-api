@@ -64,7 +64,7 @@ def search(
 
     # 基本查詢
     sql_parts = ["SELECT c.chunk_id, c.file_id, c.page, c.chunk_index, c.text,"]
-    sql_parts.append("       c.image_paths, d.filename, d.confidentiality,")
+    sql_parts.append("       c.image_paths, d.metadata_json, d.filename, d.confidentiality,")
     sql_parts.append("       (c.text_vector <=> %(vec)s::vector) AS cosine_dist")
     sql_parts.append("FROM document_chunks c")
     sql_parts.append("JOIN documents d ON c.file_id = d.file_id")
@@ -119,9 +119,9 @@ def search(
             "text": row[4],
             "image_paths": row[5] or [],
             "metadata": row[6] if len(row) > 6 else {},
-            "filename": row[7],
-            "confidentiality": row[8],
-            "score": 1 - float(row[9]),
+            "filename": row[7] if len(row) > 7 else "",
+            "confidentiality": row[8] if len(row) > 8 else "",
+            "score": 1 - float(row[9]) if len(row) > 9 else 0.0,
         })
 
     return results
@@ -137,7 +137,7 @@ def get_chunks_by_ids(chunk_ids: list[str]) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(f"""
                 SELECT c.chunk_id, c.file_id, c.page, c.chunk_index, c.text,
-                       c.image_paths, c.metadata, d.filename, d.confidentiality
+                       c.image_paths, d.metadata_json, d.filename, d.confidentiality
                 FROM document_chunks c
                 JOIN documents d ON c.file_id = d.file_id
                 WHERE c.chunk_id IN ({placeholders})

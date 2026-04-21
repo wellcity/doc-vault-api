@@ -41,6 +41,7 @@ def init_db(vector_dim: int = None):
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS documents (
                     file_id        VARCHAR(64) PRIMARY KEY,
+                    content_hash   VARCHAR(64),     -- SHA256 hash 去重
                     filename       VARCHAR(256) NOT NULL,
                     file_type      VARCHAR(16) NOT NULL,
                     confidentiality VARCHAR(32) DEFAULT '公開',
@@ -48,6 +49,11 @@ def init_db(vector_dim: int = None):
                     metadata_json  TEXT DEFAULT '{}',
                     created_at    TIMESTAMP DEFAULT NOW()
                 )
+            """)
+            # content_hash 索引（加速去重查詢）
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_documents_content_hash
+                ON documents(content_hash)
             """)
 
             # 動態建立 chunks 表（帶正確維度）
@@ -68,13 +74,14 @@ def init_db(vector_dim: int = None):
                         created_at    TIMESTAMP DEFAULT NOW()
                     )
                 """)
-                # pgvector 的 ivfflat 在高維度（>2000）會失敗，改用 HNSW。
+                # pgvector 的 vector 型別在目前版本下，ivfflat / hnsw 對維度都有上限（通常 2000）。
+                # 若模型維度更高（例如 4096），先不建立向量索引，仍可做精確搜尋（速度較慢）。
                 if vector_dim > 2000:
-                    cur.execute("""
-                        CREATE INDEX idx_chunks_vector
-                        ON document_chunks
-                        USING hnsw (text_vector vector_cosine_ops)
-                    """)
+                    logger.warning(
+                        "向量維度 %s 超過 pgvector ANN 索引上限，跳過 idx_chunks_vector 建立；"
+                        "搜尋將使用無索引精確比對。",
+                        vector_dim,
+                    )
                 else:
                     cur.execute("""
                         CREATE INDEX idx_chunks_vector

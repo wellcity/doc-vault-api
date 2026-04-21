@@ -8,9 +8,27 @@ from config import IMAGE_DIR
 from datetime import datetime, timezone
 
 
+def chunk_text(text: str, max_len: int = 8000, overlap: int = 200) -> list[str]:
+    """
+    將長文字切成多個 overlapping sub-chunks，避免超過 embedding 模型上限。
+    保留 overlap 避免斷句遺漏上下文。
+    """
+    if len(text) <= max_len:
+        return [text]
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + max_len
+        chunks.append(text[start:end])
+        start = end - overlap
+    return chunks
+
+
 def parse_pdf(file_path: str, file_id: str, metadata: dict | None = None) -> tuple[list[dict], list[str]]:
     """
     解析 PDF 檔案，回傳 (chunks, image_paths)
+    - 文字：每 chunk 最多 800 字，超長段落用 chunk_text 切成 sub-chunks
+    - 圖片：每張圖建立獨立的 image_chunk，回傳於 image_paths
     """
     chunks = []
     image_paths = []
@@ -20,60 +38,64 @@ def parse_pdf(file_path: str, file_id: str, metadata: dict | None = None) -> tup
     base_name = Path(file_path).stem
 
     for page_num, page in enumerate(doc, start=1):
-        # 萃取文字
-        text = page.get_text("text")
-        if not text.strip():
-            continue
+        # --- 文字萃取 ---
+        text = page.get_text("text").strip()
 
-        # 切割段落（每 chunk 最多 800 字）
-        paragraphs = text.split("\n")
+        # 先把前一頁累積的 current_text flush 完（跨頁長段落保護）
         current_text = ""
         chunk_index = 0
 
-        for para in paragraphs:
-            para = para.strip()
-            if not para:
-                continue
+        if text:
+            paragraphs = text.split("\n")
+            for para in paragraphs:
+                para = para.strip()
+                if not para:
+                    continue
 
-            if len(current_text) + len(para) <= 800:
-                current_text += para + "\n"
-            else:
-                if current_text.strip():
-                    chunk = _make_chunk(
-                        file_id=file_id,
-                        source_file=Path(file_path).name,
-                        file_type="pdf",
-                        page=page_num,
-                        chunk_index=chunk_index,
-                        text=current_text.strip(),
-                        image_paths=[],  # PDF 圖片先不處理
-                        metadata=metadata,
-                    )
-                    chunks.append(chunk)
+                # 超長段落（>8000字）直接用 chunk_text 切成 sub-chunks
+                if len(para) > 8000:
+                    if current_text.strip():
+                        chunks.append(_make_chunk(
+                            file_id=file_id, source_file=Path(file_path).name,
+                            file_type="pdf", page=page_num, chunk_index=chunk_index,
+                            text=current_text.strip(), image_paths=[], metadata=metadata,
+                        ))
+                        chunk_index += 1
+                        current_text = ""
+                    for sub_text in chunk_text(para, max_len=8000, overlap=200):
+                        chunks.append(_make_chunk(
+                            file_id=file_id, source_file=Path(file_path).name,
+                            file_type="pdf", page=page_num, chunk_index=chunk_index,
+                            text=sub_text, image_paths=[], metadata=metadata,
+                        ))
+                        chunk_index += 1
+                    continue
+
+                if len(current_text) + len(para) <= 800:
+                    current_text += para + "\n"
+                else:
+                    chunks.append(_make_chunk(
+                        file_id=file_id, source_file=Path(file_path).name,
+                        file_type="pdf", page=page_num, chunk_index=chunk_index,
+                        text=current_text.strip(), image_paths=[], metadata=metadata,
+                    ))
                     chunk_index += 1
+                    current_text = para + "\n"
 
-                current_text = para + "\n"
+            # 該頁最後一塊
+            if current_text.strip():
+                chunks.append(_make_chunk(
+                    file_id=file_id, source_file=Path(file_path).name,
+                    file_type="pdf", page=page_num, chunk_index=chunk_index,
+                    text=current_text.strip(), image_paths=[], metadata=metadata,
+                ))
+                chunk_index += 1
 
-        # 最後一塊
-        if current_text.strip():
-            chunk = _make_chunk(
-                file_id=file_id,
-                source_file=Path(file_path).name,
-                file_type="pdf",
-                page=page_num,
-                chunk_index=chunk_index,
-                text=current_text.strip(),
-                image_paths=[],
-                metadata=metadata,
-            )
-            chunks.append(chunk)
-
-        # 萃取圖片
+        # --- 圖片萃取（每張圖建立獨立的 image_chunk）---
         image_list = page.get_images(full=True)
         page_img_dir = Path(IMAGE_DIR) / file_id
         page_img_dir.mkdir(parents=True, exist_ok=True)
 
-        page_image_paths = []
         for img_idx, img in enumerate(image_list):
             xref = img[0]
             pix = fitz.Pixmap(doc, xref)
@@ -87,7 +109,18 @@ def parse_pdf(file_path: str, file_id: str, metadata: dict | None = None) -> tup
                 pix.save(img_path)
 
             image_paths.append(img_path)
-            page_image_paths.append(img_path)
+            # 每張圖建立一個獨立的 image_chunk
+            chunks.append(_make_chunk(
+                file_id=file_id,
+                source_file=Path(file_path).name,
+                file_type="pdf_image",  # 區分文字 chunk 與圖片 chunk
+                page=page_num,
+                chunk_index=chunk_index,
+                text=f"[圖片：{img_name}]",
+                image_paths=[img_path],
+                metadata=metadata,
+            ))
+            chunk_index += 1
 
     doc.close()
     return chunks, image_paths
