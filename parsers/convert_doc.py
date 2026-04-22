@@ -77,3 +77,65 @@ def convert_doc_to_docx(doc_path: str) -> str:
     raise RuntimeError(
         f"LibreOffice 轉換完成，但找不到輸出檔案：{result.stdout.strip()} {result.stderr.strip()}"
     )
+
+
+def convert_ppt_to_pptx(ppt_path: str) -> str:
+    """
+    將 .ppt 檔案轉換為 .pptx，並回傳 .pptx 的暫存路徑。
+
+    Args:
+        ppt_path: .ppt 檔案的絕對路徑
+
+    Returns:
+        轉換後 .pptx 檔案的暫存路徑（需自行刪除）
+
+    Raises:
+        FileNotFoundError: soffice.exe 不存在
+        RuntimeError: 轉換失敗
+    """
+    if not os.path.exists(SOFFICE_PATH):
+        raise FileNotFoundError(
+            f"LibreOffice soffice.exe 不存在：{SOFFICE_PATH}"
+            "，請先安裝 LibreOffice：https://www.libreoffice.org/download/download/"
+        )
+
+    ppt_path = Path(ppt_path).resolve()
+    if not ppt_path.exists():
+        raise FileNotFoundError(f"檔案不存在：{ppt_path}")
+
+    temp_dir = tempfile.mkdtemp(prefix="docvault_")
+    temp_pptx = Path(temp_dir) / f"{ppt_path.stem}.pptx"
+
+    cmd = [
+        SOFFICE_PATH,
+        "--headless",
+        "--convert-to", "pptx",
+        "--outdir", temp_dir,
+        str(ppt_path),
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"LibreOffice 轉換失敗：{result.stderr.strip()}")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("LibreOffice 轉換逾時（60秒）")
+    except FileNotFoundError:
+        raise
+
+    if temp_pptx.exists():
+        return str(temp_pptx)
+
+    alt_path = ppt_path.with_suffix(".pptx")
+    if alt_path.exists():
+        shutil.move(str(alt_path), str(temp_pptx))
+        return str(temp_pptx)
+
+    raise RuntimeError(
+        f"LibreOffice 轉換完成，但找不到輸出檔案：{result.stdout.strip()} {result.stderr.strip()}"
+    )

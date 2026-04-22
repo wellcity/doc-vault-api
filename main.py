@@ -13,6 +13,8 @@ import json
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
+from urllib.parse import quote
+from urllib.request import urlopen
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -26,7 +28,24 @@ try:
 except Exception:
     pass
 
-from config import API_HOST, API_PORT, IMAGE_DIR, OUTPUT_DIR
+from config import (
+    API_HOST,
+    API_PORT,
+    IMAGE_DIR,
+    OUTPUT_DIR,
+    EMBEDDING_PROVIDER,
+    OPENAI_BASE_URL,
+    OLLAMA_BASE_URL,
+    ORACLE_HOST,
+    ORACLE_PORT,
+    ORACLE_SERVICE_NAME,
+    ORACLE_SID,
+    ORACLE_DSN,
+    ORACLE_CLIENT_LIB_DIR,
+    ORACLE_USE_THICK_MODE,
+    ORACLE_USER,
+    ORACLE_PASSWORD,
+)
 from db import init_db, get_conn
 from vector_store import insert_chunks, search as pg_search, get_chunks_by_ids, get_stats
 from parsers.pdf_parser import parse_pdf
@@ -42,18 +61,26 @@ from scraper import scrape as do_scrape
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))
 
 
 # ======================== 生命週期 ========================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("初始化資料庫...")
+    logger.info("DocVault API 啟動中：host=%s, port=%s", API_HOST, API_PORT)
+    logger.info(
+        "啟動設定：embedding_provider=%s, openai_base_url=%s, ollama_base_url=%s",
+        EMBEDDING_PROVIDER,
+        OPENAI_BASE_URL,
+        OLLAMA_BASE_URL,
+    )
+    logger.info("開始初始化資料庫...")
     try:
         init_db()
-        logger.info("資料庫初始化完成")
-    except Exception as e:
-        logger.warning(f"資料庫初始化警告：{e}")
+        logger.info("資料庫初始化成功，API 準備就緒")
+    except Exception:
+        logger.exception("資料庫初始化警告：啟動時初始化失敗，服務仍會啟動")
     yield
     logger.info("DocVault API 關閉")
 
@@ -133,6 +160,10 @@ class ScrapeRequest(BaseModel):
     extract_links: bool = False   # 是否一併回傳連結清單
     timeout: float = 30.0        # 請求逾時（秒）
 
+class SqlBatchIngestRequest(BaseModel):
+    apikey: str
+    num: int = -1
+
 
 # ======================== 工具函式 ========================
 
@@ -153,44 +184,106 @@ def get_file_ext(filename: str) -> str:
     _, ext = os.path.splitext(filename)
     return ext.lower()
 
+SQL_BATCH_API_KEY = "docvault-batch-ingest-key"
+SQL_BATCH_FILE_BASE_URL = "http://giscnwebwf01/TKM"
+SQL_BATCH_SOURCE_QUERY = """
+    SELECT
+        b.attachment_id AS file_path,
+        b.file_name,
+        a.*
+    FROM km_document a
+    LEFT JOIN doc_attachement b ON a.ref_no = b.ref_no
+    WHERE a.station_no = 99 and a.secretlevel = '一般'
+"""
 
-# ======================== API 端點 ========================
+def _fetch_sql_batch_source_rows() -> tuple[list[tuple], list[str]]:
+    """從 Oracle 取得 SQL 批次來源資料"""
+    if not all([ORACLE_USER, ORACLE_PASSWORD]):
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Oracle 連線設定不完整，請設定 ORACLE_USER/ORACLE_PASSWORD"},
+        )
 
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
+    try:
+        import oracledb
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "缺少 Oracle driver，請安裝 oracledb 套件"},
+        )
 
-@app.post("/ingest")
-async def ingest(
-    file: UploadFile = File(...),
-    metadata: str | None = Form(default=None),
-):
-    """上傳檔案入庫（content_hash 去重）"""
+    if ORACLE_USE_THICK_MODE:
+        try:
+            init_kwargs = {}
+            if ORACLE_CLIENT_LIB_DIR:
+                init_kwargs["lib_dir"] = ORACLE_CLIENT_LIB_DIR
+            oracledb.init_oracle_client(**init_kwargs)
+        except Exception as e:
+            msg = str(e)
+            if "DPI-1047" in msg:
+                raise HTTPException(
+                    status_code=500,
+                    detail={"error": f"Oracle Thick Mode 初始化失敗：{msg}", "hint": "請確認已安裝 Oracle Instant Client，並正確設定 ORACLE_CLIENT_LIB_DIR"},
+                )
+            if "has already been initialized" not in msg:
+                raise HTTPException(status_code=500, detail={"error": f"Oracle Thick Mode 初始化失敗：{msg}"})
+
+    if ORACLE_DSN:
+        dsn = ORACLE_DSN
+    elif ORACLE_HOST and ORACLE_SERVICE_NAME:
+        dsn = oracledb.makedsn(ORACLE_HOST, ORACLE_PORT, service_name=ORACLE_SERVICE_NAME)
+    elif ORACLE_HOST and ORACLE_SID:
+        dsn = oracledb.makedsn(ORACLE_HOST, ORACLE_PORT, sid=ORACLE_SID)
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Oracle 連線設定不完整，請設定 ORACLE_DSN 或 ORACLE_HOST 搭配 ORACLE_SERVICE_NAME/ORACLE_SID"},
+        )
+
+    try:
+        with oracledb.connect(user=ORACLE_USER, password=ORACLE_PASSWORD, dsn=dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(SQL_BATCH_SOURCE_QUERY)
+                rows = cur.fetchall()
+                columns = [desc[0] for desc in cur.description] if cur.description else []
+        return rows, columns
+    except Exception as e:
+        msg = str(e)
+        hint = "請確認 ORACLE_SERVICE_NAME 或 ORACLE_SID 是否正確（不要填 DEDICATED），並確認 listener 已註冊該服務"
+        if "DPY-6001" in msg or "ORA-12514" in msg:
+            raise HTTPException(status_code=500, detail={"error": f"Oracle 連線失敗：{msg}", "hint": hint})
+        if "DPY-3010" in msg:
+            raise HTTPException(
+                status_code=500,
+                detail={"error": f"Oracle 連線失敗：{msg}", "hint": "此 Oracle 版本需啟用 Thick Mode，請設定 ORACLE_USE_THICK_MODE=true 並安裝 Oracle Instant Client"},
+            )
+        raise HTTPException(status_code=500, detail={"error": f"Oracle 連線失敗：{msg}"})
+
+
+async def _ingest_file_content(filename: str, content: bytes, metadata: dict | None = None) -> dict:
+    """重用 /ingest 的核心邏輯：以檔名 + bytes 完成入庫"""
     start = time.time()
+    stage_start = start
     import hashlib
 
-    # 解析 metadata（提前到副檔名檢查之前）
-    meta = {}
-    if metadata:
-        try:
-            meta = json.loads(metadata)
-        except Exception:
-            pass
+    meta = metadata or {}
+    logger.info("ingest 開始：filename=%s", filename)
 
     # 副檔名檢查（.doc 透過 LibreOffice 轉換為 .docx 後解析）
-    file_ext = get_file_ext(file.filename or "unknown")
-    if file_ext not in {".pdf", ".docx", ".pptx", ".xlsx"}:
+    file_ext = get_file_ext(filename or "unknown")
+    if file_ext not in {".pdf", ".docx", ".ppt", ".pptx", ".xlsx"}:
         raise HTTPException(
             status_code=400,
             detail={
                 "error": "Unsupported file type",
-                "supported": [".pdf", ".docx", ".pptx", ".xlsx"],
+                "supported": [".pdf", ".docx", ".ppt", ".pptx", ".xlsx"],
             },
         )
 
-    # 讀取內容並計算 content_hash（用於去重）
-    content = await file.read()
+    # 計算 content_hash（用於去重）
     content_hash = hashlib.sha256(content).hexdigest()[:32]
+    logger.info("ingest 階段完成：讀檔與計算 hash，elapsed_ms=%s", int((time.time() - stage_start) * 1000))
+    stage_start = time.time()
     file_id = str(uuid.uuid4())
     confidentiality = meta.get("confidentiality", "公開")
     department = meta.get("department", "")
@@ -217,7 +310,7 @@ async def ingest(
                             department = EXCLUDED.department,
                             metadata_json = EXCLUDED.metadata_json,
                             content_hash = EXCLUDED.content_hash
-                """, (file_id, content_hash, file.filename or "unknown", file_ext.lstrip("."), confidentiality, department, json.dumps(meta)))
+                """, (file_id, content_hash, filename or "unknown", file_ext.lstrip("."), confidentiality, department, json.dumps(meta)))
 
                 # 舊格式相容：document_id
                 doc_id = meta.get("document_id")
@@ -226,12 +319,15 @@ async def ingest(
                     file_id = doc_id
 
                 conn.commit()
+    logger.info("ingest 階段完成：documents 去重與寫入，elapsed_ms=%s", int((time.time() - stage_start) * 1000))
+    stage_start = time.time()
 
     # 儲存暫存檔
     temp_dir = Path("/tmp/docvault")
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp_path = temp_dir / f"{file_id}{file_ext}"
     converted_docx = None  # 追蹤轉換後的 .docx 暫存檔
+    converted_pptx = None  # 追蹤轉換後的 .pptx 暫存檔
 
     try:
         with open(temp_path, "wb") as f:
@@ -257,18 +353,84 @@ async def ingest(
                 )
             except RuntimeError as e:
                 raise HTTPException(status_code=400, detail={"error": f".doc 轉換失敗：{str(e)}"})
+        if file_ext == ".ppt":
+            from parsers.convert_doc import convert_ppt_to_pptx
+            try:
+                converted_pptx = convert_ppt_to_pptx(str(temp_path))
+                logger.info(f".ppt 轉換成功：{converted_pptx}")
+                temp_path = Path(converted_pptx)
+                file_ext = ".pptx"
+            except FileNotFoundError as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "error": "LibreOffice not found",
+                        "message": str(e),
+                        "hint": "請在 Windows 伺服器上安裝 LibreOffice：https://www.libreoffice.org/download/download/",
+                    },
+                )
+            except RuntimeError as e:
+                raise HTTPException(status_code=400, detail={"error": f".ppt 轉換失敗：{str(e)}"})
 
         # 解析
         chunks, image_paths = parse_file(str(temp_path), file_id, file_ext, meta)
         chunk_count = len(chunks)
         image_count = len(image_paths)
+        logger.info(
+            "ingest 階段完成：文件解析，chunks=%s, images=%s, elapsed_ms=%s",
+            chunk_count,
+            image_count,
+            int((time.time() - stage_start) * 1000),
+        )
+        stage_start = time.time()
 
         # 向量化（批次一次送出，大幅減少 HTTP 往返）
         embed = get_embedding_provider()
         texts_for_embed = [c["text"][:8000] for c in chunks]
-        vectors = embed.embed(texts_for_embed)
+        logger.info(
+            "ingest 向量化開始：total_chunks=%s, batch_size=%s",
+            len(texts_for_embed),
+            EMBEDDING_BATCH_SIZE,
+        )
+        vectors: list[list[float]] = []
+        for i in range(0, len(texts_for_embed), EMBEDDING_BATCH_SIZE):
+            batch_start = time.time()
+            batch = texts_for_embed[i:i + EMBEDDING_BATCH_SIZE]
+            batch_no = i // EMBEDDING_BATCH_SIZE + 1
+            batch_total = (len(texts_for_embed) + EMBEDDING_BATCH_SIZE - 1) // EMBEDDING_BATCH_SIZE
+            logger.info(
+                "ingest 向量化批次開始：batch=%s/%s, size=%s",
+                batch_no,
+                batch_total,
+                len(batch),
+            )
+            try:
+                vectors.extend(embed.embed(batch))
+            except Exception as e:
+                logger.exception(
+                    "ingest 向量化批次失敗：batch=%s/%s, size=%s",
+                    batch_no,
+                    batch_total,
+                    len(batch),
+                )
+                raise HTTPException(
+                    status_code=504,
+                    detail={
+                        "error": "Embedding timeout or connection error",
+                        "message": str(e),
+                        "batch": f"{batch_no}/{batch_total}",
+                    },
+                )
+            logger.info(
+                "ingest 向量化批次完成：batch=%s/%s, elapsed_ms=%s",
+                batch_no,
+                batch_total,
+                int((time.time() - batch_start) * 1000),
+            )
         for chunk, vec in zip(chunks, vectors):
             chunk["embedding"] = vec
+        logger.info("ingest 階段完成：向量化，elapsed_ms=%s", int((time.time() - stage_start) * 1000))
+        stage_start = time.time()
 
         # 寫入 PostgreSQL
         try:
@@ -277,24 +439,27 @@ async def ingest(
             logger.warning("document_chunks 表不存在，嘗試自動 init_db 重建後再寫入...")
             init_db()
             insert_chunks(chunks)
+        logger.info("ingest 階段完成：寫入 chunks，elapsed_ms=%s", int((time.time() - stage_start) * 1000))
 
         elapsed_ms = int((time.time() - start) * 1000)
 
-        return JSONResponse({
+        return {
             "file_id": file_id,
-            "filename": file.filename,
+            "filename": filename,
             "file_type": file_ext.lstrip("."),
             "confidentiality": confidentiality,
             "status": "completed",
             "chunk_count": chunk_count,
             "image_count": image_count,
             "processing_time_ms": elapsed_ms,
-        })
+        }
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"error": str(e)})
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.exception("入庫錯誤")
+        logger.exception("入庫錯誤：filename=%s", filename)
         raise HTTPException(status_code=500, detail={"error": str(e)})
     finally:
         if temp_path.exists():
@@ -302,6 +467,138 @@ async def ingest(
         if converted_docx and Path(converted_docx).exists():
             os.remove(converted_docx)
             Path(converted_docx).parent.rmdir()  # 嘗試刪除空目錄
+        if converted_pptx and Path(converted_pptx).exists():
+            os.remove(converted_pptx)
+            Path(converted_pptx).parent.rmdir()  # 嘗試刪除空目錄
+
+
+# ======================== API 端點 ========================
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+@app.post("/ingest")
+async def ingest(
+    file: UploadFile = File(...),
+    metadata: str | None = Form(default=None),
+):
+    """上傳檔案入庫（content_hash 去重）"""
+    meta = {}
+    if metadata:
+        try:
+            meta = json.loads(metadata)
+        except Exception:
+            pass
+
+    content = await file.read()
+    result = await _ingest_file_content(
+        filename=file.filename or "unknown",
+        content=content,
+        metadata=meta,
+    )
+    return JSONResponse(result)
+
+
+@app.post("/ingest/sql-batch")
+async def ingest_sql_batch(req: SqlBatchIngestRequest):
+    """使用固定 SQL 取得檔案路徑並批次入庫"""
+    if req.apikey != SQL_BATCH_API_KEY:
+        raise HTTPException(status_code=403, detail={"error": "Invalid apikey"})
+    if req.num == 0 or req.num < -1:
+        raise HTTPException(status_code=400, detail={"error": "num 必須為正整數或 -1"})
+
+    rows, columns = _fetch_sql_batch_source_rows()
+
+    total_source = len(rows)
+    selected_rows = rows if req.num == -1 else rows[:req.num]
+    results = []
+    success_count = 0
+    failed_count = 0
+
+    for idx, row in enumerate(selected_rows, start=1):
+        row_map = {str(columns[i]).upper(): row[i] for i in range(min(len(columns), len(row)))}
+        file_path = row_map.get("FILE_PATH")
+        source_filename = row_map.get("FILE_NAME")
+        source_doc_id = row_map.get("DOC_ID")
+        source_secret_level = row_map.get("SECRETLEVEL")
+
+        if not file_path:
+            failed_count += 1
+            results.append({
+                "index": idx,
+                "status": "failed",
+                "error": "SQL 缺少 file_path",
+            })
+            continue
+
+        normalized_path = str(file_path).replace("\\", "/").lstrip("~").lstrip("/")
+        encoded_path = "/".join(quote(part) for part in normalized_path.split("/") if part)
+        file_url = f"{SQL_BATCH_FILE_BASE_URL.rstrip('/')}/{encoded_path}"
+        metadata = {
+            "source": "sql_batch",
+            "source_file_path": str(file_path),
+            "source_file_url": file_url,
+        }
+        if source_doc_id:
+            metadata["document_id"] = str(source_doc_id)
+        if source_secret_level:
+            metadata["confidentiality"] = str(source_secret_level)
+
+        try:
+            with urlopen(file_url, timeout=30) as response:
+                file_bytes = response.read()
+            filename = (str(source_filename) if source_filename else Path(normalized_path).name) or "unknown"
+            ingest_result = await _ingest_file_content(
+                filename=filename,
+                content=file_bytes,
+                metadata=metadata,
+            )
+            success_count += 1
+            results.append({
+                "index": idx,
+                "status": "completed",
+                "file_path": file_path,
+                "file_url": file_url,
+                "file_id": ingest_result.get("file_id"),
+                "chunk_count": ingest_result.get("chunk_count", 0),
+            })
+        except HTTPException as e:
+            failed_count += 1
+            results.append({
+                "index": idx,
+                "status": "failed",
+                "file_path": file_path,
+                "file_url": file_url,
+                "error": e.detail,
+            })
+        except FileNotFoundError:
+            failed_count += 1
+            results.append({
+                "index": idx,
+                "status": "failed",
+                "file_path": file_path,
+                "file_url": file_url,
+                "error": "檔案不存在",
+            })
+        except Exception as e:
+            failed_count += 1
+            results.append({
+                "index": idx,
+                "status": "failed",
+                "file_path": file_path,
+                "file_url": file_url,
+                "error": str(e),
+            })
+
+    return JSONResponse({
+        "status": "completed",
+        "source_count": total_source,
+        "processed_count": len(selected_rows),
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "results": results,
+    })
 
 
 @app.post("/search")

@@ -30,3 +30,14 @@ OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./output")
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "5002"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Oracle（KM 來源資料庫）
+ORACLE_HOST = os.getenv("ORACLE_HOST", "")
+ORACLE_PORT = int(os.getenv("ORACLE_PORT", "1521"))
+ORACLE_SERVICE_NAME = os.getenv("ORACLE_SERVICE_NAME", "")
+ORACLE_SID = os.getenv("ORACLE_SID", "")
+ORACLE_DSN = os.getenv("ORACLE_DSN", "")
+ORACLE_CLIENT_LIB_DIR = os.getenv("ORACLE_CLIENT_LIB_DIR", "")
+ORACLE_USE_THICK_MODE = os.getenv("ORACLE_USE_THICK_MODE", "false").lower() in {"1", "true", "yes", "on"}
+ORACLE_USER = os.getenv("ORACLE_USER", "")
+ORACLE_PASSWORD = os.getenv("ORACLE_PASSWORD", "")
