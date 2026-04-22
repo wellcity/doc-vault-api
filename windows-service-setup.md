@@ -89,6 +89,40 @@ DocVault API 依賴 PostgreSQL，確保 PostgreSQL Docker container 先行啟動
 
 ---
 
+## Step 3.5：建立 `.env`（本機/伺服器專用）
+
+在專案目錄建立 `.env`，至少包含：
+
+```env
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=docvault
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=***
+
+EMBEDDING_PROVIDER=openai
+OPENAI_API_KEY=lm-studio
+OPENAI_BASE_URL=http://localhost:1234/v1
+OPENAI_EMBEDDING_MODEL=Qwen3-Embedding-8B-GGUF
+EMBEDDING_BATCH_SIZE=4
+```
+
+若要使用 `/ingest/sql-batch`（Oracle 來源），再補上：
+
+```env
+ORACLE_HOST=
+ORACLE_PORT=1521
+ORACLE_SERVICE_NAME=
+ORACLE_USER=
+ORACLE_PASSWORD=
+ORACLE_USE_THICK_MODE=false
+ORACLE_CLIENT_LIB_DIR=
+```
+
+注意：`.env` 不可提交到 Git，僅保留在部署機器。
+
+---
+
 ## Step 4：啟動服務
 
 ```powershell

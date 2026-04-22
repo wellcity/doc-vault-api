@@ -29,7 +29,7 @@ docker run -d --name docvault-postgres \
 
 ### 3. 設定
 
-建立 `.env` 檔案：
+建立本機用 `.env` 檔案（不要提交到 Git）：
 
 ```bash
 # PostgreSQL
@@ -60,7 +60,25 @@ LOCAL_EMBEDDING_DIM=384
 # 服務
 API_HOST=0.0.0.0
 API_PORT=5002
+EMBEDDING_BATCH_SIZE=4
+
+# Oracle（SQL 批次入庫來源）
+ORACLE_HOST=
+ORACLE_PORT=1521
+ORACLE_SERVICE_NAME=
+# ORACLE_SID=
+# ORACLE_DSN=
+ORACLE_USER=
+ORACLE_PASSWORD=
+
+# 若 Oracle 版本較舊，需啟用 Thick Mode
+ORACLE_USE_THICK_MODE=false
+ORACLE_CLIENT_LIB_DIR=
 ```
+
+注意：
+- `.env` 僅供本機/伺服器使用，請勿推送到遠端儲存庫。
+- `ORACLE_DSN`、`ORACLE_HOST+ORACLE_SERVICE_NAME`、`ORACLE_HOST+ORACLE_SID` 三種方式擇一即可。
 
 ### 4. 啟動
 
@@ -82,6 +100,7 @@ curl http://localhost:5002/health
 |------|------|------|------|
 || GET | `/health` | 健康檢查 |
 || POST | `/ingest` | 上傳檔案入庫 |
+|| POST | `/ingest/sql-batch` | 依固定 SQL 批次入庫（Oracle 來源） |
 || POST | `/search` | 向量搜尋文件 |
 || POST | `/permissions/sync` | 同步使用者權限 |
 || GET | `/permissions/{user_id}` | 查詢使用者權限 |
@@ -110,6 +129,21 @@ curl -X POST http://localhost:5002/ingest \
   -F "file=@機密文件.pdf" \
   -F "metadata={\"confidentiality\":\"機密\",\"department\":\"HR\"}"
 ```
+
+### SQL 批次入庫（Oracle 來源）
+
+```bash
+curl -X POST http://localhost:5002/ingest/sql-batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "apikey": "docvault-batch-ingest-key",
+    "num": 1
+  }'
+```
+
+參數說明：
+- `apikey`: 批次入庫金鑰（目前為程式內固定值）
+- `num`: 要處理的筆數；`-1` 代表全部
 
 ### 搜尋
 
@@ -342,7 +376,7 @@ curl -X POST http://localhost:5002/export/ppt \
 ||------|--------|------|
 || PDF | `.pdf` | 每段或每頁為一個 chunk |
 || Word | `.doc` `.docx` | 段落 + 表格萃取（`.doc` 自動轉 `.docx`） |
-|| PowerPoint | `.pptx` | 每張投影片為一個 chunk |
+|| PowerPoint | `.ppt` `.pptx` | 每張投影片為一個 chunk（`.ppt` 自動轉 `.pptx`） |
 || Excel | `.xlsx` | 每個工作表為一個 chunk |
 
 ## 與 McpServerIIS 整合
