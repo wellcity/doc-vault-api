@@ -6,6 +6,7 @@ import sys
 sys.path.append(".")
 
 import logging
+import os
 from abc import ABC, abstractmethod
 from config import EMBEDDING_PROVIDER, OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_EMBEDDING_MODEL, \
     OLLAMA_BASE_URL, OLLAMA_EMBEDDING_MODEL, \
@@ -62,9 +63,12 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         from openai import OpenAI
         import httpx
 
+        timeout_seconds = float(os.getenv("OPENAI_EMBEDDING_TIMEOUT_SECONDS", "120"))
+
         # 這裡特別關閉 trust_env，避免環境變數（例如 http_proxy/https_proxy）
         # 影響到連到 LM Studio 的行為，導致連線被強制中斷。
-        http_client = httpx.Client(timeout=60.0, trust_env=False)
+        http_client = httpx.Client(timeout=timeout_seconds, trust_env=False)
+        logger.info("OpenAI Embedding timeout 設定：%s 秒", timeout_seconds)
 
         if base_url:
             self.client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)

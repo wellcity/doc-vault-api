@@ -29,8 +29,11 @@ def parse_pptx(file_path: str, file_id: str, metadata: dict | None = None) -> tu
         slide_text = ""
 
         # 標題
-        if slide.shapes.title:
-            slide_text += f"# {slide.shapes.title.text}\n"
+        title_shape = slide.shapes.title
+        if title_shape and getattr(title_shape, "has_text_frame", False):
+            title_text = (title_shape.text or "").strip()
+            if title_text:
+                slide_text += f"# {title_text}\n"
 
         # 內文
         for shape in slide.shapes:

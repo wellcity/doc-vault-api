@@ -62,6 +62,9 @@ from scraper import scrape as do_scrape
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))
+EMBEDDING_BATCH_MAX_RETRIES = int(os.getenv("EMBEDDING_BATCH_MAX_RETRIES", "2"))
+EMBEDDING_BATCH_RETRY_BACKOFF_MS = int(os.getenv("EMBEDDING_BATCH_RETRY_BACKOFF_MS", "800"))
+EMBEDDING_BATCH_MIN_SIZE = int(os.getenv("EMBEDDING_BATCH_MIN_SIZE", "2"))
 
 
 # ======================== 生命週期 ========================
@@ -289,6 +292,7 @@ async def _ingest_file_content(filename: str, content: bytes, metadata: dict | N
     department = meta.get("department", "")
 
     # 先查是否已有相同 content_hash 的檔案（去重）
+    duplicated_file_id: str | None = None
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -298,6 +302,7 @@ async def _ingest_file_content(filename: str, content: bytes, metadata: dict | N
             row = cur.fetchone()
             if row:
                 file_id = row[0]
+                duplicated_file_id = file_id
                 logger.info(f"發現重複檔案，複用 file_id={file_id}")
             else:
                 # 寫入 documents 表
@@ -321,6 +326,34 @@ async def _ingest_file_content(filename: str, content: bytes, metadata: dict | N
                 conn.commit()
     logger.info("ingest 階段完成：documents 去重與寫入，elapsed_ms=%s", int((time.time() - stage_start) * 1000))
     stage_start = time.time()
+
+    # 若同 content_hash 文件已存在且已有 chunks，直接回傳避免重複建立
+    if duplicated_file_id:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM document_chunks WHERE file_id = %s",
+                    (duplicated_file_id,),
+                )
+                existing_chunk_count = cur.fetchone()[0]
+        if existing_chunk_count > 0:
+            elapsed_ms = int((time.time() - start) * 1000)
+            logger.info(
+                "ingest 重複檔案略過重建：file_id=%s, existing_chunks=%s",
+                duplicated_file_id,
+                existing_chunk_count,
+            )
+            return {
+                "file_id": duplicated_file_id,
+                "filename": filename,
+                "file_type": file_ext.lstrip("."),
+                "confidentiality": confidentiality,
+                "status": "completed",
+                "chunk_count": existing_chunk_count,
+                "image_count": 0,
+                "processing_time_ms": elapsed_ms,
+                "deduplicated": True,
+            }
 
     # 儲存暫存檔
     temp_dir = Path("/tmp/docvault")
@@ -393,6 +426,42 @@ async def _ingest_file_content(filename: str, content: bytes, metadata: dict | N
             EMBEDDING_BATCH_SIZE,
         )
         vectors: list[list[float]] = []
+
+        def _embed_batch_with_retry(batch_texts: list[str], batch_tag: str) -> list[list[float]]:
+            last_error: Exception | None = None
+            for attempt in range(1, EMBEDDING_BATCH_MAX_RETRIES + 2):
+                try:
+                    return embed.embed(batch_texts)
+                except Exception as e:
+                    last_error = e
+                    if attempt > EMBEDDING_BATCH_MAX_RETRIES:
+                        break
+                    backoff_ms = EMBEDDING_BATCH_RETRY_BACKOFF_MS * (2 ** (attempt - 1))
+                    logger.warning(
+                        "ingest 向量化批次重試：batch=%s, attempt=%s/%s, backoff_ms=%s, error=%s",
+                        batch_tag,
+                        attempt,
+                        EMBEDDING_BATCH_MAX_RETRIES + 1,
+                        backoff_ms,
+                        str(e),
+                    )
+                    time.sleep(backoff_ms / 1000.0)
+
+            if len(batch_texts) > EMBEDDING_BATCH_MIN_SIZE:
+                split_at = len(batch_texts) // 2
+                left = batch_texts[:split_at]
+                right = batch_texts[split_at:]
+                logger.warning(
+                    "ingest 向量化批次拆分重試：batch=%s, original_size=%s, left_size=%s, right_size=%s",
+                    batch_tag,
+                    len(batch_texts),
+                    len(left),
+                    len(right),
+                )
+                return _embed_batch_with_retry(left, f"{batch_tag}-L") + _embed_batch_with_retry(right, f"{batch_tag}-R")
+
+            raise last_error if last_error else RuntimeError("未知的向量化錯誤")
+
         for i in range(0, len(texts_for_embed), EMBEDDING_BATCH_SIZE):
             batch_start = time.time()
             batch = texts_for_embed[i:i + EMBEDDING_BATCH_SIZE]
@@ -405,7 +474,7 @@ async def _ingest_file_content(filename: str, content: bytes, metadata: dict | N
                 len(batch),
             )
             try:
-                vectors.extend(embed.embed(batch))
+                vectors.extend(_embed_batch_with_retry(batch, f"{batch_no}/{batch_total}"))
             except Exception as e:
                 logger.exception(
                     "ingest 向量化批次失敗：batch=%s/%s, size=%s",
@@ -434,6 +503,11 @@ async def _ingest_file_content(filename: str, content: bytes, metadata: dict | N
 
         # 寫入 PostgreSQL
         try:
+            # 同一 file_id 重跑時先清舊 chunks，避免累積重複資料
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM document_chunks WHERE file_id = %s", (file_id,))
+                conn.commit()
             insert_chunks(chunks)
         except psycopg2.errors.UndefinedTable:
             logger.warning("document_chunks 表不存在，嘗試自動 init_db 重建後再寫入...")
