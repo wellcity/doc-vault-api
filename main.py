@@ -65,6 +65,7 @@ EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))
 EMBEDDING_BATCH_MAX_RETRIES = int(os.getenv("EMBEDDING_BATCH_MAX_RETRIES", "2"))
 EMBEDDING_BATCH_RETRY_BACKOFF_MS = int(os.getenv("EMBEDDING_BATCH_RETRY_BACKOFF_MS", "800"))
 EMBEDDING_BATCH_MIN_SIZE = int(os.getenv("EMBEDDING_BATCH_MIN_SIZE", "2"))
+EMBEDDING_MAX_TEXT_LENGTH = int(os.getenv("EMBEDDING_MAX_TEXT_LENGTH", "6000"))
 
 
 # ======================== 生命週期 ========================
@@ -419,13 +420,25 @@ async def _ingest_file_content(filename: str, content: bytes, metadata: dict | N
 
         # 向量化（批次一次送出，大幅減少 HTTP 往返）
         embed = get_embedding_provider()
-        texts_for_embed = [c["text"][:8000] for c in chunks]
+        texts_for_embed = [c["text"][:EMBEDDING_MAX_TEXT_LENGTH] for c in chunks]
+        unique_text_to_index: dict[str, int] = {}
+        unique_texts: list[str] = []
+        chunk_to_unique_index: list[int] = []
+        for text in texts_for_embed:
+            idx = unique_text_to_index.get(text)
+            if idx is None:
+                idx = len(unique_texts)
+                unique_text_to_index[text] = idx
+                unique_texts.append(text)
+            chunk_to_unique_index.append(idx)
         logger.info(
-            "ingest 向量化開始：total_chunks=%s, batch_size=%s",
+            "ingest 向量化開始：total_chunks=%s, unique_texts=%s, batch_size=%s, max_text_len=%s",
             len(texts_for_embed),
+            len(unique_texts),
             EMBEDDING_BATCH_SIZE,
+            EMBEDDING_MAX_TEXT_LENGTH,
         )
-        vectors: list[list[float]] = []
+        unique_vectors: list[list[float]] = []
 
         def _embed_batch_with_retry(batch_texts: list[str], batch_tag: str) -> list[list[float]]:
             last_error: Exception | None = None
@@ -462,11 +475,11 @@ async def _ingest_file_content(filename: str, content: bytes, metadata: dict | N
 
             raise last_error if last_error else RuntimeError("未知的向量化錯誤")
 
-        for i in range(0, len(texts_for_embed), EMBEDDING_BATCH_SIZE):
+        for i in range(0, len(unique_texts), EMBEDDING_BATCH_SIZE):
             batch_start = time.time()
-            batch = texts_for_embed[i:i + EMBEDDING_BATCH_SIZE]
+            batch = unique_texts[i:i + EMBEDDING_BATCH_SIZE]
             batch_no = i // EMBEDDING_BATCH_SIZE + 1
-            batch_total = (len(texts_for_embed) + EMBEDDING_BATCH_SIZE - 1) // EMBEDDING_BATCH_SIZE
+            batch_total = (len(unique_texts) + EMBEDDING_BATCH_SIZE - 1) // EMBEDDING_BATCH_SIZE
             logger.info(
                 "ingest 向量化批次開始：batch=%s/%s, size=%s",
                 batch_no,
@@ -474,7 +487,7 @@ async def _ingest_file_content(filename: str, content: bytes, metadata: dict | N
                 len(batch),
             )
             try:
-                vectors.extend(_embed_batch_with_retry(batch, f"{batch_no}/{batch_total}"))
+                unique_vectors.extend(_embed_batch_with_retry(batch, f"{batch_no}/{batch_total}"))
             except Exception as e:
                 logger.exception(
                     "ingest 向量化批次失敗：batch=%s/%s, size=%s",
@@ -496,8 +509,8 @@ async def _ingest_file_content(filename: str, content: bytes, metadata: dict | N
                 batch_total,
                 int((time.time() - batch_start) * 1000),
             )
-        for chunk, vec in zip(chunks, vectors):
-            chunk["embedding"] = vec
+        for chunk, unique_idx in zip(chunks, chunk_to_unique_index):
+            chunk["embedding"] = unique_vectors[unique_idx]
         logger.info("ingest 階段完成：向量化，elapsed_ms=%s", int((time.time() - stage_start) * 1000))
         stage_start = time.time()
 

@@ -9,7 +9,15 @@ import logging
 import psycopg2
 from psycopg2.extras import execute_values
 from contextlib import contextmanager
-from config import POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, LOCAL_EMBEDDING_DIM
+from config import (
+    POSTGRES_HOST,
+    POSTGRES_PORT,
+    POSTGRES_DB,
+    POSTGRES_USER,
+    POSTGRES_PASSWORD,
+    POSTGRES_TIMEZONE,
+    LOCAL_EMBEDDING_DIM,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +28,8 @@ _DSN = f"host={POSTGRES_HOST} port={POSTGRES_PORT} dbname={POSTGRES_DB} user={PO
 def get_conn():
     """取得資料庫連線（自動還原）"""
     conn = psycopg2.connect(_DSN)
+    with conn.cursor() as cur:
+        cur.execute("SET TIME ZONE %s", (POSTGRES_TIMEZONE,))
     try:
         yield conn
     finally:

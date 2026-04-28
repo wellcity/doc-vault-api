@@ -9,6 +9,7 @@ POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
 POSTGRES_DB = os.getenv("POSTGRES_DB", "docvault")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
+POSTGRES_TIMEZONE = os.getenv("POSTGRES_TIMEZONE", "Asia/Taipei")
 
 # Embedding 設定
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "openai")
