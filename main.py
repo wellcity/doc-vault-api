@@ -10,6 +10,7 @@ import io
 import uuid
 import time
 import json
+import asyncio
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -66,6 +67,18 @@ EMBEDDING_BATCH_MAX_RETRIES = int(os.getenv("EMBEDDING_BATCH_MAX_RETRIES", "2"))
 EMBEDDING_BATCH_RETRY_BACKOFF_MS = int(os.getenv("EMBEDDING_BATCH_RETRY_BACKOFF_MS", "800"))
 EMBEDDING_BATCH_MIN_SIZE = int(os.getenv("EMBEDDING_BATCH_MIN_SIZE", "2"))
 EMBEDDING_MAX_TEXT_LENGTH = int(os.getenv("EMBEDDING_MAX_TEXT_LENGTH", "6000"))
+SQL_BATCH_CONCURRENCY = max(1, int(os.getenv("SQL_BATCH_CONCURRENCY", "4")))
+SQL_BATCH_CHUNK_SIZE = max(1, int(os.getenv("SQL_BATCH_CHUNK_SIZE", "20")))
+SQL_BATCH_ROW_MAX_RETRIES = max(0, int(os.getenv("SQL_BATCH_ROW_MAX_RETRIES", "2")))
+SQL_BATCH_ROW_RETRY_BACKOFF_MS = max(100, int(os.getenv("SQL_BATCH_ROW_RETRY_BACKOFF_MS", "600")))
+SQL_BATCH_DOWNLOAD_TIMEOUT_SEC = max(1, int(os.getenv("SQL_BATCH_DOWNLOAD_TIMEOUT_SEC", "30")))
+SEARCH_PROTECT_ENABLED = os.getenv("SEARCH_PROTECT_ENABLED", "true").lower() == "true"
+SEARCH_PROTECT_THRESHOLD = max(1, int(os.getenv("SEARCH_PROTECT_THRESHOLD", "1")))
+SEARCH_PROTECT_INGEST_CONCURRENCY = max(1, int(os.getenv("SEARCH_PROTECT_INGEST_CONCURRENCY", "2")))
+BATCH_JOB_TTL_SECONDS = max(60, int(os.getenv("BATCH_JOB_TTL_SECONDS", "21600")))
+
+SQL_BATCH_JOBS: dict[str, dict] = {}
+ACTIVE_SEARCH_REQUESTS = 0
 
 
 # ======================== 生命週期 ========================
@@ -264,8 +277,8 @@ def _fetch_sql_batch_source_rows() -> tuple[list[tuple], list[str]]:
         raise HTTPException(status_code=500, detail={"error": f"Oracle 連線失敗：{msg}"})
 
 
-async def _ingest_file_content(filename: str, content: bytes, metadata: dict | None = None) -> dict:
-    """重用 /ingest 的核心邏輯：以檔名 + bytes 完成入庫"""
+def _ingest_file_content_sync(filename: str, content: bytes, metadata: dict | None = None) -> dict:
+    """重用 /ingest 的核心邏輯：以檔名 + bytes 完成入庫（同步執行）"""
     start = time.time()
     stage_start = start
     import hashlib
@@ -559,6 +572,193 @@ async def _ingest_file_content(filename: str, content: bytes, metadata: dict | N
             Path(converted_pptx).parent.rmdir()  # 嘗試刪除空目錄
 
 
+async def _ingest_file_content(filename: str, content: bytes, metadata: dict | None = None) -> dict:
+    """
+    非阻塞包裝：將 CPU/IO 密集入庫工作放到 thread pool，
+    避免長任務卡住 FastAPI event loop，讓 search 請求可持續處理。
+    """
+    return await asyncio.to_thread(_ingest_file_content_sync, filename, content, metadata)
+
+
+def _download_file_bytes(file_url: str) -> bytes:
+    """同步下載檔案 bytes（供 asyncio.to_thread 呼叫）。"""
+    with urlopen(file_url, timeout=SQL_BATCH_DOWNLOAD_TIMEOUT_SEC) as response:
+        return response.read()
+
+
+async def _process_sql_batch_row(idx: int, row: tuple, columns: list[str], sem: asyncio.Semaphore) -> tuple[int, dict]:
+    """
+    處理單一 SQL 批次列（下載 + 入庫），回傳 (index, result) 以便排序。
+    使用 semaphore 控制並行數，避免壓垮 embedding/DB 後端。
+    """
+    async with sem:
+        row_map = {str(columns[i]).upper(): row[i] for i in range(min(len(columns), len(row)))}
+        file_path = row_map.get("FILE_PATH")
+        source_filename = row_map.get("FILE_NAME")
+        source_doc_id = row_map.get("DOC_ID")
+        source_secret_level = row_map.get("SECRETLEVEL")
+
+        if not file_path:
+            return idx, {
+                "index": idx,
+                "status": "failed",
+                "error": "SQL 缺少 file_path",
+            }
+
+        normalized_path = str(file_path).replace("\\", "/").lstrip("~").lstrip("/")
+        encoded_path = "/".join(quote(part) for part in normalized_path.split("/") if part)
+        file_url = f"{SQL_BATCH_FILE_BASE_URL.rstrip('/')}/{encoded_path}"
+        metadata = {
+            "source": "sql_batch",
+            "source_file_path": str(file_path),
+            "source_file_url": file_url,
+        }
+        if source_doc_id:
+            metadata["document_id"] = str(source_doc_id)
+        if source_secret_level:
+            metadata["confidentiality"] = str(source_secret_level)
+
+        try:
+            file_bytes = await asyncio.to_thread(_download_file_bytes, file_url)
+            filename = (str(source_filename) if source_filename else Path(normalized_path).name) or "unknown"
+            ingest_result = await _ingest_file_content(
+                filename=filename,
+                content=file_bytes,
+                metadata=metadata,
+            )
+            return idx, {
+                "index": idx,
+                "status": "completed",
+                "file_path": file_path,
+                "file_url": file_url,
+                "file_id": ingest_result.get("file_id"),
+                "chunk_count": ingest_result.get("chunk_count", 0),
+            }
+        except HTTPException as e:
+            return idx, {
+                "index": idx,
+                "status": "failed",
+                "file_path": file_path,
+                "file_url": file_url,
+                "error": e.detail,
+            }
+        except FileNotFoundError:
+            return idx, {
+                "index": idx,
+                "status": "failed",
+                "file_path": file_path,
+                "file_url": file_url,
+                "error": "檔案不存在",
+            }
+        except Exception as e:
+            return idx, {
+                "index": idx,
+                "status": "failed",
+                "file_path": file_path,
+                "file_url": file_url,
+                "error": str(e),
+            }
+
+
+async def _process_sql_batch_row_with_retry(idx: int, row: tuple, columns: list[str], sem: asyncio.Semaphore) -> tuple[int, dict]:
+    """單列批次處理重試包裝，提升不穩定網路或暫時性錯誤成功率。"""
+    last_result: tuple[int, dict] | None = None
+    for attempt in range(1, SQL_BATCH_ROW_MAX_RETRIES + 2):
+        result = await _process_sql_batch_row(idx, row, columns, sem)
+        last_result = result
+        if result[1].get("status") == "completed":
+            return result
+        if attempt <= SQL_BATCH_ROW_MAX_RETRIES:
+            backoff_ms = SQL_BATCH_ROW_RETRY_BACKOFF_MS * (2 ** (attempt - 1))
+            await asyncio.sleep(backoff_ms / 1000.0)
+    return last_result if last_result else (idx, {"index": idx, "status": "failed", "error": "未知錯誤"})
+
+
+def _cleanup_expired_jobs() -> None:
+    """清除過期工作，避免 in-memory job list 持續成長。"""
+    now = time.time()
+    expired = []
+    for job_id, job in SQL_BATCH_JOBS.items():
+        if now - float(job.get("updated_at_ts", now)) > BATCH_JOB_TTL_SECONDS:
+            expired.append(job_id)
+    for job_id in expired:
+        SQL_BATCH_JOBS.pop(job_id, None)
+
+
+def _job_summary(job: dict) -> dict:
+    processed = int(job.get("processed_count", 0))
+    total = int(job.get("total_count", 0))
+    progress = round((processed / total) * 100, 2) if total > 0 else 0.0
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "created_at": job["created_at"],
+        "updated_at": job["updated_at"],
+        "source_count": job.get("source_count", 0),
+        "processed_count": processed,
+        "total_count": total,
+        "success_count": job.get("success_count", 0),
+        "failed_count": job.get("failed_count", 0),
+        "progress_percent": progress,
+        "requested_num": job.get("requested_num"),
+        "normal_concurrency": job.get("normal_concurrency"),
+        "search_protect_concurrency": job.get("search_protect_concurrency"),
+        "chunk_size": job.get("chunk_size"),
+        "error": job.get("error"),
+    }
+
+
+async def _run_sql_batch_job(job_id: str, req: SqlBatchIngestRequest) -> None:
+    """背景執行 SQL 批次入庫，並持續更新 job 進度。"""
+    job = SQL_BATCH_JOBS[job_id]
+    try:
+        rows, columns = await asyncio.to_thread(_fetch_sql_batch_source_rows)
+        total_source = len(rows)
+        selected_rows = rows if req.num == -1 else rows[:req.num]
+
+        job["status"] = "running"
+        job["source_count"] = total_source
+        job["total_count"] = len(selected_rows)
+        job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        job["updated_at_ts"] = time.time()
+
+        results: list[dict] = []
+        for chunk_start in range(0, len(selected_rows), SQL_BATCH_CHUNK_SIZE):
+            row_chunk = selected_rows[chunk_start:chunk_start + SQL_BATCH_CHUNK_SIZE]
+            effective_concurrency = SQL_BATCH_CONCURRENCY
+            if SEARCH_PROTECT_ENABLED and ACTIVE_SEARCH_REQUESTS >= SEARCH_PROTECT_THRESHOLD:
+                effective_concurrency = min(SQL_BATCH_CONCURRENCY, SEARCH_PROTECT_INGEST_CONCURRENCY)
+
+            sem = asyncio.Semaphore(effective_concurrency)
+            tasks = [
+                _process_sql_batch_row_with_retry(chunk_start + idx + 1, row, columns, sem)
+                for idx, row in enumerate(row_chunk)
+            ]
+            chunk_results = await asyncio.gather(*tasks)
+            chunk_results.sort(key=lambda x: x[0])
+            results.extend(item for _, item in chunk_results)
+
+            processed = len(results)
+            success = sum(1 for r in results if r["status"] == "completed")
+            failed = processed - success
+            job["processed_count"] = processed
+            job["success_count"] = success
+            job["failed_count"] = failed
+            job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            job["updated_at_ts"] = time.time()
+
+        job["status"] = "completed"
+        job["results"] = results
+        job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        job["updated_at_ts"] = time.time()
+    except Exception as e:
+        logger.exception("SQL 批次入庫背景任務失敗：job_id=%s", job_id)
+        job["status"] = "failed"
+        job["error"] = str(e)
+        job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        job["updated_at_ts"] = time.time()
+
+
 # ======================== API 端點 ========================
 
 @app.get("/health")
@@ -589,108 +789,70 @@ async def ingest(
 
 @app.post("/ingest/sql-batch")
 async def ingest_sql_batch(req: SqlBatchIngestRequest):
-    """使用固定 SQL 取得檔案路徑並批次入庫"""
+    """建立 SQL 批次入庫背景任務，立即回傳 job_id。"""
     if req.apikey != SQL_BATCH_API_KEY:
         raise HTTPException(status_code=403, detail={"error": "Invalid apikey"})
     if req.num == 0 or req.num < -1:
         raise HTTPException(status_code=400, detail={"error": "num 必須為正整數或 -1"})
 
-    rows, columns = _fetch_sql_batch_source_rows()
-
-    total_source = len(rows)
-    selected_rows = rows if req.num == -1 else rows[:req.num]
-    results = []
-    success_count = 0
-    failed_count = 0
-
-    for idx, row in enumerate(selected_rows, start=1):
-        row_map = {str(columns[i]).upper(): row[i] for i in range(min(len(columns), len(row)))}
-        file_path = row_map.get("FILE_PATH")
-        source_filename = row_map.get("FILE_NAME")
-        source_doc_id = row_map.get("DOC_ID")
-        source_secret_level = row_map.get("SECRETLEVEL")
-
-        if not file_path:
-            failed_count += 1
-            results.append({
-                "index": idx,
-                "status": "failed",
-                "error": "SQL 缺少 file_path",
-            })
-            continue
-
-        normalized_path = str(file_path).replace("\\", "/").lstrip("~").lstrip("/")
-        encoded_path = "/".join(quote(part) for part in normalized_path.split("/") if part)
-        file_url = f"{SQL_BATCH_FILE_BASE_URL.rstrip('/')}/{encoded_path}"
-        metadata = {
-            "source": "sql_batch",
-            "source_file_path": str(file_path),
-            "source_file_url": file_url,
-        }
-        if source_doc_id:
-            metadata["document_id"] = str(source_doc_id)
-        if source_secret_level:
-            metadata["confidentiality"] = str(source_secret_level)
-
-        try:
-            with urlopen(file_url, timeout=30) as response:
-                file_bytes = response.read()
-            filename = (str(source_filename) if source_filename else Path(normalized_path).name) or "unknown"
-            ingest_result = await _ingest_file_content(
-                filename=filename,
-                content=file_bytes,
-                metadata=metadata,
-            )
-            success_count += 1
-            results.append({
-                "index": idx,
-                "status": "completed",
-                "file_path": file_path,
-                "file_url": file_url,
-                "file_id": ingest_result.get("file_id"),
-                "chunk_count": ingest_result.get("chunk_count", 0),
-            })
-        except HTTPException as e:
-            failed_count += 1
-            results.append({
-                "index": idx,
-                "status": "failed",
-                "file_path": file_path,
-                "file_url": file_url,
-                "error": e.detail,
-            })
-        except FileNotFoundError:
-            failed_count += 1
-            results.append({
-                "index": idx,
-                "status": "failed",
-                "file_path": file_path,
-                "file_url": file_url,
-                "error": "檔案不存在",
-            })
-        except Exception as e:
-            failed_count += 1
-            results.append({
-                "index": idx,
-                "status": "failed",
-                "file_path": file_path,
-                "file_url": file_url,
-                "error": str(e),
-            })
+    _cleanup_expired_jobs()
+    job_id = str(uuid.uuid4())
+    now_text = time.strftime("%Y-%m-%d %H:%M:%S")
+    SQL_BATCH_JOBS[job_id] = {
+        "job_id": job_id,
+        "status": "queued",
+        "created_at": now_text,
+        "updated_at": now_text,
+        "updated_at_ts": time.time(),
+        "requested_num": req.num,
+        "source_count": 0,
+        "processed_count": 0,
+        "total_count": 0,
+        "success_count": 0,
+        "failed_count": 0,
+        "normal_concurrency": SQL_BATCH_CONCURRENCY,
+        "search_protect_concurrency": SEARCH_PROTECT_INGEST_CONCURRENCY,
+        "chunk_size": SQL_BATCH_CHUNK_SIZE,
+        "results": [],
+        "error": None,
+    }
+    asyncio.create_task(_run_sql_batch_job(job_id, req))
 
     return JSONResponse({
-        "status": "completed",
-        "source_count": total_source,
-        "processed_count": len(selected_rows),
-        "success_count": success_count,
-        "failed_count": failed_count,
-        "results": results,
+        "status": "accepted",
+        "job_id": job_id,
+        "message": "SQL 批次入庫已加入背景任務，請用 job_id 查詢進度",
+    })
+
+
+@app.get("/ingest/sql-batch/{job_id}")
+async def ingest_sql_batch_status(job_id: str):
+    """查詢 SQL 批次入庫背景任務狀態與進度。"""
+    _cleanup_expired_jobs()
+    job = SQL_BATCH_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail={"error": "找不到 job_id，可能已過期"})
+    return JSONResponse(_job_summary(job))
+
+
+@app.get("/ingest/sql-batch/{job_id}/results")
+async def ingest_sql_batch_results(job_id: str):
+    """查詢 SQL 批次入庫背景任務結果明細。"""
+    _cleanup_expired_jobs()
+    job = SQL_BATCH_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail={"error": "找不到 job_id，可能已過期"})
+    return JSONResponse({
+        **_job_summary(job),
+        "results": job.get("results", []),
     })
 
 
 @app.post("/search")
 async def search_endpoint(req: SearchRequest):
     """搜尋文件（可指定 user_id 做權限過濾）"""
+    global ACTIVE_SEARCH_REQUESTS
+    ACTIVE_SEARCH_REQUESTS += 1
     try:
         embed = get_embedding_provider()
         vectors = embed.embed([req.query])
@@ -713,6 +875,8 @@ async def search_endpoint(req: SearchRequest):
     except Exception as e:
         logger.exception("搜尋錯誤")
         raise HTTPException(status_code=500, detail={"error": str(e)})
+    finally:
+        ACTIVE_SEARCH_REQUESTS = max(0, ACTIVE_SEARCH_REQUESTS - 1)
 
 
 @app.post("/permissions/sync")
